@@ -4,7 +4,7 @@ members = ["firmware"]
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [profile.release]
 opt-level = "s"
