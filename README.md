@@ -206,4 +206,4 @@ UART: 2 Мбит/с, 8N1, DMA в обе стороны, путь к Raspberry Pi
 
 ---
 
-<span style="color:#a78bfa">LICENSE</span> `MIT OR Apache-2.0`
+<span style="color:#a78bfa">LICENSE</span> `MIT`
