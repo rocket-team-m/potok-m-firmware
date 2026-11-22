@@ -17,7 +17,7 @@
 //! supplied by the script. Running the same script twice gives a bit-identical
 //! trace, which is the property the gates check.
 
-use crate::{
+use potok_m_firmware::{
     board::Board,
     control::{step, LinkState, StepResult},
     interlocks::{Decision, Input as InterlockInput, Interlocks, Refusal},
@@ -589,7 +589,7 @@ pub fn simulate<B: HarnessBoard, const CAP: usize>(
 #[cfg(not(target_os = "none"))]
 mod host {
     use super::{Command, HarnessBoard, PhaseEvent};
-    use crate::mock::MockBoard;
+    use potok_m_firmware::mock::MockBoard;
 
     impl HarnessBoard for MockBoard {
         fn set_now_us(&mut self, us: u32) {

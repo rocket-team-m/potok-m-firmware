@@ -16,7 +16,6 @@ pub mod control;
 pub mod control_pid;
 pub mod deadman;
 pub mod deployment;
-pub mod fault_inject;
 pub mod interlocks;
 #[cfg(not(target_os = "none"))]
 pub mod mock;
@@ -25,15 +24,12 @@ pub mod phase;
 pub mod phase_fsm;
 pub mod protocol;
 pub mod protocol_link;
-pub mod replay;
 pub mod scheduler;
 pub mod search_beacon;
 pub mod self_test;
 pub mod sensor_voting;
 pub mod separation;
-pub mod sil;
 pub mod telemetry_log;
-pub mod timing_budget;
 pub mod uart;
 pub mod watchdog;
 

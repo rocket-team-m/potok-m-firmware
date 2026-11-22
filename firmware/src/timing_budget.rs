@@ -2,22 +2,22 @@
 //! 500 Hz timing budget from the `perf` cycle model and SIL worst cases.
 //!
 //! `lib.rs` is owned by the parent task, so this module is included by path in
-//! the host tests. It depends only on `core`, [`crate::perf`],
-//! [`crate::scheduler`] and the protocol crate, and builds unchanged inside the
+//! the host tests. It depends only on `core`, [`potok_m_firmware::perf`],
+//! [`potok_m_firmware::scheduler`] and the protocol crate, and builds unchanged inside the
 //! `no_std` firmware library.
 //!
 //! The SIL scenarios below are synthetic upper bounds on the work a single
 //! control tick can be asked to do by the simulator's frame stream: a full
 //! double-buffer RX, every scaled field, an open gate and both command axes.
 //! They are *not* wall-clock measurements. Every number comes from
-//! [`crate::perf::CycleEstimate`], the same model the benchmark and the
+//! [`potok_m_firmware::perf::CycleEstimate`], the same model the benchmark and the
 //! hardware cycle counter are meant to check.
 //!
 //! An overrun is LOUD: [`BudgetReport::evaluate`] panics with the scenario
 //! name, the modelled cycles and the 500 Hz budget; the worst-case constant is
 //! additionally checked at compile time.
 
-use crate::{
+use potok_m_firmware::{
     perf::{CycleEstimate, CORE_HZ, CYCLE_BUDGET, CYCLE_BUDGET_US},
     scheduler::TICK_HZ,
 };
