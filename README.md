@@ -1,3 +1,5 @@
+![Поток-М: Прошивка](docs/banner.svg)
+
 # Поток-М: прошивка STM32H743
 
 Репозиторий бортовой прошивки Potok-M на Rust (Embassy, `no_std`, Cortex-M7).
