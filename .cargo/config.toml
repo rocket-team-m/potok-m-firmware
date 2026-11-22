@@ -1,0 +1,8 @@
+[target.thumbv7em-none-eabihf]
+# TODO(bom): confirm the chip variant before flashing.
+runner = ["probe-rs", "run", "--chip", "STM32H743ZI"]
+# link.x from cortex-m-rt includes memory.x; defmt.x places the log sections.
+rustflags = [
+  "-C", "link-arg=-Tlink.x",
+  "-C", "link-arg=-Tdefmt.x",
+]
