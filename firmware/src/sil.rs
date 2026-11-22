@@ -556,12 +556,13 @@ impl<B: HarnessBoard> Simulator<B> {
         if self.link.is_disabled() && !disabled_before {
             trace.event(TraceEvent::LinkDisabled { tick });
         }
-        let latch_now = self.gate().latched();
-        if latch_now.is_some() && latch_now != latch_before {
-            trace.event(TraceEvent::InterlockLatched {
-                tick,
-                refusal: latch_now.expect("checked above"),
-            });
+        if let Some(latch_now) = self.gate().latched() {
+            if Some(latch_now) != latch_before {
+                trace.event(TraceEvent::InterlockLatched {
+                    tick,
+                    refusal: latch_now,
+                });
+            }
         }
 
         self.tick_index = self.tick_index.wrapping_add(1);

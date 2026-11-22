@@ -185,7 +185,7 @@ fn search_pattern_is_periodic_and_two_instances_agree() {
     assert_eq!(&tones[cycle..2 * cycle], &tones[2 * cycle..3 * cycle]);
     assert!(tones.iter().any(|t| t.freq_hz == SEARCH_CALL_HZ));
     assert!(tones.iter().any(|t| t.freq_hz == SEARCH_PEAK_HZ));
-    assert!(tones.iter().any(|t| *t == SILENT), "pattern has gaps");
+    assert!(tones.contains(&SILENT), "pattern has gaps");
     assert!(tones
         .iter()
         .all(|t| t.freq_hz == 0 || t.duty == DUTY_FULL_BUZZER));
