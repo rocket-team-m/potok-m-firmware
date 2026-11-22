@@ -25,7 +25,7 @@ jobs:
         run: cargo test --test safety --test watchguard_tests --test protocol_link_tests
 
       - name: Timing-budget gates
-        run: cargo test --test perf_tests --test scheduler_tests --test watchdog_tests
+        run: cargo test --test perf_tests --test scheduler_tests --test watchdog_tests --test timing_budget_tests
 
       - name: thumb no_std check
         run: cargo check --target thumbv7em-none-eabihf
