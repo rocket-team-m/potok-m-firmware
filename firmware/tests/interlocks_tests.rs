@@ -66,7 +66,13 @@ fn unknown_phase_is_zero_and_latches_until_reset() {
     assert_eq!(g.latched(), None);
     let d = g.evaluate(input(Phase::COAST, 50, -50, 6_000));
     assert!(d.permitted);
-    assert_eq!(d.command, Command { pitch: 10, yaw: -10 });
+    assert_eq!(
+        d.command,
+        Command {
+            pitch: 10,
+            yaw: -10
+        }
+    );
 }
 
 #[test]
@@ -138,7 +144,13 @@ fn implausible_command_latches_even_at_the_i16_edge() {
     let d = g.evaluate(input(Phase::COAST, 100, -100, 0));
     assert!(d.permitted);
     // A diagonal request is plausible, but still rate-limited per axis.
-    assert_eq!(d.command, Command { pitch: 10, yaw: -10 });
+    assert_eq!(
+        d.command,
+        Command {
+            pitch: 10,
+            yaw: -10
+        }
+    );
 }
 
 #[test]
@@ -176,7 +188,11 @@ fn latch_reason_persists_and_only_reset_clears_it() {
         healthy.flags = 0;
         let d = g.evaluate(healthy);
         assert_eq!(d.command, Command::ZERO);
-        assert_eq!(d.refusal, Some(Refusal::AiUnhealthy), "original cause stays");
+        assert_eq!(
+            d.refusal,
+            Some(Refusal::AiUnhealthy),
+            "original cause stays"
+        );
         assert!(!d.permitted);
     }
     assert_eq!(g.counters.trips, 1, "a latch trips once, not once per tick");
@@ -209,11 +225,19 @@ fn rate_limit_clock_is_wrap_safe() {
     assert_eq!(d.command, Command { pitch: 10, yaw: 0 });
 
     let d = g.evaluate(input(Phase::COAST, 50, 0, 100));
-    assert_eq!(d.command, Command { pitch: 10, yaw: 0 }, "wrapped 111 us: throttled");
+    assert_eq!(
+        d.command,
+        Command { pitch: 10, yaw: 0 },
+        "wrapped 111 us: throttled"
+    );
     assert!(d.limited);
 
     let d = g.evaluate(input(Phase::COAST, 50, 0, 1_200));
-    assert_eq!(d.command, Command { pitch: 20, yaw: 0 }, "wrapped 1211 us: accepted");
+    assert_eq!(
+        d.command,
+        Command { pitch: 20, yaw: 0 },
+        "wrapped 1211 us: accepted"
+    );
 }
 
 #[test]
