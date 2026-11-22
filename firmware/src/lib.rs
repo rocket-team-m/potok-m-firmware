@@ -8,6 +8,21 @@
 #[cfg(not(target_os = "none"))]
 extern crate std;
 
+pub mod attitude;
+pub mod buzzer;
+pub mod calibration_table;
+pub mod control_pid;
+pub mod deployment;
+pub mod interlocks;
+pub mod perf;
+pub mod phase_fsm;
+pub mod protocol_link;
+pub mod scheduler;
+pub mod search_beacon;
+pub mod self_test;
+pub mod sensor_voting;
+pub mod separation;
+pub mod telemetry_log;
 pub mod board;
 pub mod control;
 pub mod deadman;
