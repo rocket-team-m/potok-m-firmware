@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Software-in-the-loop gates only. Real-board/HIL verification remains the
+# final verification for flight; see docs/SIL.md.
+name: sil
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  sil:
+    name: software-in-the-loop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+
+      - name: Host SIL suite
+        run: cargo test --workspace
+
+      - name: Fault-injection gates
+        run: cargo test --test safety --test watchguard_tests --test protocol_link_tests
+
+      - name: Timing-budget gates
+        run: cargo test --test perf_tests --test scheduler_tests --test watchdog_tests
+
+      - name: thumb no_std check
+        run: cargo check --target thumbv7em-none-eabihf
