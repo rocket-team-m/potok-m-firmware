@@ -17,7 +17,7 @@
 //! Wiring into the crate root is owned by the parent task; this file declares
 //! no `mod` entries elsewhere. Host tests include it by path.
 
-use potok_m_firmware::{
+use crate::{
     board::Board,
     phase::{PhaseEvent, PhaseFsm},
     protocol::{encode_reply, Phase, ReplyFrame, RequestFrame, REPLY_SIZE},
@@ -188,7 +188,7 @@ impl Fault {
 }
 
 const fn crate_max_misses() -> u8 {
-    potok_m_firmware::MAX_CONSECUTIVE_MISSES
+    crate::MAX_CONSECUTIVE_MISSES
 }
 
 /// What the injector puts on the wire (or deliberately leaves off it) for one

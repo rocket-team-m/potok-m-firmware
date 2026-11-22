@@ -589,7 +589,7 @@ pub fn simulate<B: HarnessBoard, const CAP: usize>(
 #[cfg(not(target_os = "none"))]
 mod host {
     use super::{Command, HarnessBoard, PhaseEvent};
-    use potok_m_firmware::mock::MockBoard;
+    use crate::mock::MockBoard;
 
     impl HarnessBoard for MockBoard {
         fn set_now_us(&mut self, us: u32) {
