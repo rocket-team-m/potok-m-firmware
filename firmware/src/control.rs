@@ -6,13 +6,14 @@ use potok_protocol as pp;
 use crate::{
     board::Board,
     deadman::Deadman,
+    interlocks::{Input as InterlockInput, Interlocks},
     phase::PhaseFsm,
     protocol::{
         decode_reply, encode_request, flags, ReplyAssembler, ReplyFrame, RequestFrame, SeqGate,
         REPLY_SIZE, REQUEST_SIZE,
     },
     uart::{DoubleBufferRx, FrameTx},
-    watchdog::{self, Watchdog},
+    watchdog::{self, FeedDecision, Watchdog, WatchdogPolicy},
     Command,
 };
 
@@ -38,6 +39,21 @@ pub enum StepResult {
     /// Magic/CRC/version/seq rejected; the miss counter moved.
     FrameRejected,
     Accepted(Command),
+}
+
+/// The link layer's decision before the independent safety gates run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TickDecision {
+    result: StepResult,
+    /// Command the link layer asks to apply; ZERO on every rejected outcome.
+    command: Command,
+    /// Health byte of a decoded reply. True when no reply decoded, so a frame
+    /// fault cannot latch the interlock's AiUnhealthy refusal.
+    ai_healthy: bool,
+    /// Sensor/motor/AI-ready bits the link placed in this tick's request.
+    flags: u8,
+    /// Timestamp of this tick, shared by the interlock and the deadline monitor.
+    now_us: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -177,14 +193,11 @@ impl Default for LinkState {
     }
 }
 
-/// One 500 Hz control tick. Sends a request with an STM32-owned phase, consumes
-/// at most one reply frame, gates the command and decides on the watchdog feed.
-pub fn step<B: Board>(
-    board: &mut B,
-    fsm: &mut PhaseFsm,
-    link: &mut LinkState,
-    cycle_complete: bool,
-) -> StepResult {
+/// One 500 Hz link tick: send a request with an STM32-owned phase, consume at
+/// most one reply frame and compute the command the link layer asks to apply.
+/// No hardware boundary is crossed here; both [`step_link`] and the gated
+/// [`step`] build on this single implementation.
+fn link_tick<B: Board>(board: &mut B, fsm: &mut PhaseFsm, link: &mut LinkState) -> TickDecision {
     if let Some(event) = board.poll_phase_event() {
         let _ = fsm.apply(event);
     }
@@ -196,11 +209,12 @@ pub fn step<B: Board>(
     if !link.is_disabled() {
         flags::set(&mut flags, flags::AI_READY);
     }
+    let now_us = board.now_us();
 
     let seq = link.next_request_seq();
     let request = RequestFrame {
         seq,
-        time_us: board.now_us(),
+        time_us: now_us,
         phase,
         version: pp::REQUEST_VERSION,
         flags,
@@ -225,33 +239,116 @@ pub fn step<B: Board>(
         }
     }
 
-    let outcome = match frame {
+    match frame {
         Some(bytes) => match decode_reply(&bytes) {
             Ok(reply) => {
+                let ai_healthy = reply.ai_healthy != 0;
                 let reply_outcome = link.on_reply(&reply, fsm, flags);
-                board.apply_command(reply_outcome.command);
-                if reply_outcome.accepted {
+                let result = if reply_outcome.accepted {
                     StepResult::Accepted(reply_outcome.command)
                 } else {
                     StepResult::FrameRejected
+                };
+                TickDecision {
+                    result,
+                    command: reply_outcome.command,
+                    ai_healthy,
+                    flags,
+                    now_us,
                 }
             }
             Err(_) => {
                 link.on_invalid();
                 link.discard_partial_frame();
-                board.apply_command(Command::ZERO);
-                StepResult::FrameRejected
+                TickDecision {
+                    result: StepResult::FrameRejected,
+                    command: Command::ZERO,
+                    ai_healthy: true,
+                    flags,
+                    now_us,
+                }
             }
         },
         None => {
             link.on_timeout();
-            board.apply_command(Command::ZERO);
-            StepResult::Idle
+            TickDecision {
+                result: StepResult::Idle,
+                command: Command::ZERO,
+                ai_healthy: true,
+                flags,
+                now_us,
+            }
         }
-    };
+    }
+}
 
+/// Link-level control tick: link, phase and wire-fault gates only.
+///
+/// Used by the link/host tests and the SIL harness, which owns its own
+/// independent interlock inside the actuation path. The shipping binary uses
+/// [`step`] instead.
+pub fn step_link<B: Board>(
+    board: &mut B,
+    fsm: &mut PhaseFsm,
+    link: &mut LinkState,
+    cycle_complete: bool,
+) -> StepResult {
+    let tick = link_tick(board, fsm, link);
+    board.apply_command(tick.command);
     if watchdog::may_feed(cycle_complete, link.deadman_tripped()) {
         board.wd().pet();
     }
-    outcome
+    tick.result
+}
+
+/// Production 500 Hz control tick.
+///
+/// Every command crosses the independent [`Interlocks`] gate and the
+/// [`WatchdogPolicy`] deadline monitor before it reaches the hardware boundary.
+/// Any veto collapses the output to [`Command::ZERO`]. Feeding still requires
+/// the legacy link-deadman gate as well as the watchguard feed decision, so AI
+/// silence cannot keep IWDG alive and a missed control deadline stops feeding.
+pub fn step<B: Board>(
+    board: &mut B,
+    fsm: &mut PhaseFsm,
+    link: &mut LinkState,
+    interlock: &mut Interlocks,
+    policy: &mut WatchdogPolicy,
+    cycle_complete: bool,
+) -> StepResult {
+    let tick = link_tick(board, fsm, link);
+
+    // Keep the policy's AI latch in step with the link latch. Both force zero,
+    // neither clears the other implicitly; the interlock keeps its own latch.
+    if link.is_disabled() {
+        policy.latch_ai();
+    } else {
+        policy.reset_ai_latch();
+    }
+
+    let decision = interlock.evaluate(InterlockInput {
+        phase_code: fsm.phase() as u8,
+        flags: tick.flags,
+        ai_healthy: tick.ai_healthy,
+        requested: tick.command,
+        now_us: tick.now_us,
+    });
+    let feed = policy.on_control_cycle(tick.now_us, cycle_complete, true);
+
+    let output = if decision.permitted && !policy.must_zero_output() {
+        decision.command
+    } else {
+        Command::ZERO
+    };
+    board.apply_command(output);
+
+    if feed == FeedDecision::Feed && watchdog::may_feed(cycle_complete, link.deadman_tripped()) {
+        board.wd().pet();
+    }
+
+    // Report the command that actually reached the board.
+    match tick.result {
+        StepResult::Accepted(_) => StepResult::Accepted(output),
+        other => other,
+    }
 }

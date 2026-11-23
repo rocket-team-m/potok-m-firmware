@@ -33,7 +33,7 @@ pub mod telemetry_log;
 pub mod uart;
 pub mod watchdog;
 
-pub use control::{step, Counters, LinkState, StepResult};
+pub use control::{step, step_link, Counters, LinkState, StepResult};
 pub use phase::{PhaseEvent, PhaseFsm};
 pub use protocol::{FrameError, ReplyFrame, RequestFrame, SeqGate};
 

@@ -19,7 +19,7 @@
 
 use potok_m_firmware::{
     board::Board,
-    control::{step, LinkState, StepResult},
+    control::{step_link, LinkState, StepResult},
     interlocks::{Decision, Input as InterlockInput, Interlocks, Refusal},
     phase::{PhaseEvent, PhaseFsm},
     protocol::{encode_reply, flags, Phase, ReplyFrame, REPLY_SIZE},
@@ -519,7 +519,10 @@ impl<B: HarnessBoard> Simulator<B> {
             now_us,
         });
 
-        let result = step(
+        // The harness owns the independent interlock in `Guarded`, so it drives
+        // the ungated link tick; the binary uses `control::step` with its own
+        // interlock and watchguard policy.
+        let result = step_link(
             &mut self.board,
             &mut self.fsm,
             &mut self.link,

@@ -8,7 +8,7 @@ use potok_m_firmware::{
         decode_reply, encode_reply, encode_request, flags, Phase, ReplyAssembler, ReplyFrame,
         RequestFrame, SeqGate, REPLY_SIZE, REQUEST_SIZE,
     },
-    step,
+    step_link,
     uart::DoubleBufferRx,
     watchdog::may_feed,
     Command, LinkState, StepResult,
@@ -38,7 +38,7 @@ fn reply_step(
     yaw: i16,
 ) -> Command {
     board.queue_reply(&reply(next_seq(link), pitch, yaw));
-    step(board, fsm, link, true);
+    step_link(board, fsm, link, true);
     *board
         .applied
         .last()
@@ -97,7 +97,7 @@ fn crc_rejection_is_a_miss_and_produces_zero_command() {
     corrupt[4] ^= 0x01;
     board.queue_bytes(&corrupt);
     assert_eq!(
-        step(&mut board, &mut fsm, &mut link, true),
+        step_link(&mut board, &mut fsm, &mut link, true),
         StepResult::FrameRejected
     );
     assert_eq!(link.misses(), 1);
@@ -130,7 +130,7 @@ fn seq_wrap_accepts_zero_after_max_and_rejects_stale() {
     let mut link = LinkState::new();
     board.queue_reply(&reply(999, 100, 100));
     assert_eq!(
-        step(&mut board, &mut fsm, &mut link, true),
+        step_link(&mut board, &mut fsm, &mut link, true),
         StepResult::FrameRejected
     );
     assert_eq!(board.applied.last(), Some(&Command::ZERO));
@@ -179,7 +179,7 @@ fn three_misses_latch_ai_off_until_explicit_reset() {
         corrupt[12] ^= 0x02; // CRC bytes
         board.queue_bytes(&corrupt);
         assert_eq!(
-            step(&mut board, &mut fsm, &mut link, true),
+            step_link(&mut board, &mut fsm, &mut link, true),
             StepResult::FrameRejected
         );
     }
@@ -214,7 +214,7 @@ fn unhealthy_ai_disables_immediately() {
     let mut unhealthy = reply(next_seq(&link), 100, 100);
     unhealthy.ai_healthy = 0;
     board.queue_reply(&unhealthy);
-    step(&mut board, &mut fsm, &mut link, true);
+    step_link(&mut board, &mut fsm, &mut link, true);
     assert_eq!(board.applied.last(), Some(&Command::ZERO));
     assert!(link.is_disabled());
     assert_eq!(link.counters.disables, 1);
@@ -240,19 +240,19 @@ fn watchdog_and_deadman_state_machine() {
     let mut link = LinkState::new();
 
     board.cycle_complete = false;
-    step(&mut board, &mut fsm, &mut link, false);
+    step_link(&mut board, &mut fsm, &mut link, false);
     assert_eq!(board.pets(), 0);
 
     board.cycle_complete = true;
-    step(&mut board, &mut fsm, &mut link, true);
+    step_link(&mut board, &mut fsm, &mut link, true);
     assert_eq!(board.pets(), 1);
 
     // Two more silent ticks trip the deadman; feeding stops thereafter.
-    step(&mut board, &mut fsm, &mut link, true);
-    step(&mut board, &mut fsm, &mut link, true);
+    step_link(&mut board, &mut fsm, &mut link, true);
+    step_link(&mut board, &mut fsm, &mut link, true);
     assert!(link.deadman_tripped());
     let pets = board.pets();
-    step(&mut board, &mut fsm, &mut link, true);
+    step_link(&mut board, &mut fsm, &mut link, true);
     assert_eq!(board.pets(), pets);
 
     // A fresh valid reply clears the deadman and feeding resumes.
@@ -263,7 +263,7 @@ fn watchdog_and_deadman_state_machine() {
         after_reply > pets,
         "a fresh reply restores watchdog feeding"
     );
-    step(&mut board, &mut fsm, &mut link, true);
+    step_link(&mut board, &mut fsm, &mut link, true);
     assert_eq!(board.pets(), after_reply + 1);
 }
 

@@ -11,7 +11,7 @@ use potok_protocol as pp;
 
 use crate::{
     board::Board,
-    control::{step, Counters, LinkState, StepResult},
+    control::{step_link, Counters, LinkState, StepResult},
     phase::PhaseFsm,
     protocol::{encode_request, FrameError, RequestFrame},
     uart::{DmaBuffers, DoubleBufferRx, UartError},
@@ -105,7 +105,8 @@ pub struct SensorSample {
 
 /// Board-bound link endpoint. Owns only protocol state: the `Board` owns the
 /// peripheral, the clock and the actuator. Every safety decision stays in
-/// [`LinkState`] and [`PhaseFsm`], reached through [`step`].
+/// [`LinkState`] and [`PhaseFsm`], reached through [`step_link`]. The shipping
+/// loop adds the independent gates in [`crate::control::step`].
 #[derive(Clone, Copy, Debug)]
 pub struct ProtocolLink {
     fsm: PhaseFsm,
@@ -123,7 +124,7 @@ impl ProtocolLink {
     /// One 500 Hz tick: send a request, consume at most one reply frame, gate
     /// the command and decide the watchdog feed.
     pub fn tick<B: Board>(&mut self, board: &mut B, cycle_complete: bool) -> StepResult {
-        step(board, &mut self.fsm, &mut self.link, cycle_complete)
+        step_link(board, &mut self.fsm, &mut self.link, cycle_complete)
     }
 
     pub const fn phase(&self) -> pp::Phase {

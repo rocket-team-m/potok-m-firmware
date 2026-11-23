@@ -10,7 +10,7 @@ use potok_m_firmware::{
     mock::MockBoard,
     phase::PhaseFsm,
     protocol::{encode_reply, flags, Phase, ReplyFrame, REPLY_SIZE},
-    step,
+    step_link,
     watchdog::{
         FeedDecision, Severity, WatchdogPolicy, CONTROL_PERIOD_US, DEADLINE_LIMIT,
         DEADLINE_SLACK_US,
@@ -51,7 +51,7 @@ fn drive(
     if let Some(frame) = frame {
         board.queue_reply(&frame);
     }
-    step(board, fsm, link, true)
+    step_link(board, fsm, link, true)
 }
 
 /// Queue a well-formed reply carrying the seq the next step will issue.
@@ -133,7 +133,7 @@ fn mixed_bad_frames_and_a_timeout_share_one_three_strike_latch() {
     // Bad CRC.
     board.queue_bytes(&corrupt_bytes(&link, 50, 50));
     assert_eq!(
-        step(&mut board, &mut fsm, &mut link, true),
+        step_link(&mut board, &mut fsm, &mut link, true),
         StepResult::FrameRejected
     );
     assert_eq!(link.misses(), 1);
@@ -142,7 +142,7 @@ fn mixed_bad_frames_and_a_timeout_share_one_three_strike_latch() {
     let stale = next_seq(&link).wrapping_add(1);
     board.queue_reply(&reply(stale, 50, 50));
     assert_eq!(
-        step(&mut board, &mut fsm, &mut link, true),
+        step_link(&mut board, &mut fsm, &mut link, true),
         StepResult::FrameRejected
     );
     assert_eq!(link.misses(), 2);
@@ -150,7 +150,7 @@ fn mixed_bad_frames_and_a_timeout_share_one_three_strike_latch() {
 
     // Silence counts as the third miss and latches.
     assert_eq!(
-        step(&mut board, &mut fsm, &mut link, true),
+        step_link(&mut board, &mut fsm, &mut link, true),
         StepResult::Idle
     );
     assert!(link.is_disabled());
@@ -186,7 +186,7 @@ fn a_valid_frame_resets_the_miss_run_before_the_latch() {
     for expected in 1..=2 {
         board.queue_bytes(&corrupt_bytes(&link, 10, 10));
         assert_eq!(
-            step(&mut board, &mut fsm, &mut link, true),
+            step_link(&mut board, &mut fsm, &mut link, true),
             StepResult::FrameRejected
         );
         assert_eq!(link.misses(), expected);
@@ -199,7 +199,7 @@ fn a_valid_frame_resets_the_miss_run_before_the_latch() {
     assert!(!link.is_disabled());
 
     board.queue_bytes(&corrupt_bytes(&link, 10, 10));
-    step(&mut board, &mut fsm, &mut link, true);
+    step_link(&mut board, &mut fsm, &mut link, true);
     assert_eq!(
         link.misses(),
         1,
@@ -207,7 +207,7 @@ fn a_valid_frame_resets_the_miss_run_before_the_latch() {
     );
 
     board.queue_bytes(&corrupt_bytes(&link, 10, 10));
-    step(&mut board, &mut fsm, &mut link, true);
+    step_link(&mut board, &mut fsm, &mut link, true);
     assert_eq!(link.misses(), 2);
     assert!(!link.is_disabled(), "two misses are still below the latch");
 }
@@ -255,7 +255,7 @@ fn silent_link_trips_the_deadman_and_stops_feeding_until_a_frame_arrives() {
 
     for expected in 1..=MAX_CONSECUTIVE_MISSES {
         assert_eq!(
-            step(&mut board, &mut fsm, &mut link, true),
+            step_link(&mut board, &mut fsm, &mut link, true),
             StepResult::Idle
         );
         assert_eq!(link.misses(), expected);
@@ -266,7 +266,7 @@ fn silent_link_trips_the_deadman_and_stops_feeding_until_a_frame_arrives() {
 
     // Still silent and tripped: the watchdog is not fed.
     assert_eq!(
-        step(&mut board, &mut fsm, &mut link, true),
+        step_link(&mut board, &mut fsm, &mut link, true),
         StepResult::Idle
     );
     assert_eq!(board.pets(), pets_at_trip);
@@ -314,7 +314,7 @@ fn ai_latch_forces_zero_without_stopping_the_control_loop_feed() {
     // An incomplete cycle never feeds, latched or not.
     let seq = next_seq(&link);
     board.queue_reply(&reply(seq, 40, 40));
-    step(&mut board, &mut fsm, &mut link, false);
+    step_link(&mut board, &mut fsm, &mut link, false);
     assert_eq!(board.pets(), 2);
 }
 

@@ -293,7 +293,7 @@ fn replayed_ticks_drive_the_real_mockboard_control_loop() {
         let mut buf = [0u8; REPLY_SIZE];
         encode_reply(&tick.reply, &mut buf).unwrap();
         board.queue_bytes(&buf);
-        let outcome = control::step(&mut board, &mut fsm, &mut link, true);
+        let outcome = control::step_link(&mut board, &mut fsm, &mut link, true);
         if matches!(outcome, control::StepResult::Accepted(_)) {
             accepted += 1;
         }

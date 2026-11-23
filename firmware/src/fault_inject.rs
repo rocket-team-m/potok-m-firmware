@@ -21,7 +21,7 @@ use potok_m_firmware::{
     board::Board,
     phase::{PhaseEvent, PhaseFsm},
     protocol::{encode_reply, Phase, ReplyFrame, RequestFrame, REPLY_SIZE},
-    step, Command, LinkState, StepResult,
+    step_link, Command, LinkState, StepResult,
 };
 
 /// Number of distinct faults this instrument can inject.
@@ -288,7 +288,7 @@ pub fn drive_step<B: Board>(
     fsm: &mut PhaseFsm,
     link: &mut LinkState,
 ) -> Observation {
-    let result = step(board, fsm, link, true);
+    let result = step_link(board, fsm, link, true);
     let command = match result {
         StepResult::Accepted(command) => command,
         StepResult::FrameRejected | StepResult::Idle => Command::ZERO,

@@ -110,7 +110,12 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[embassy_executor::main]
 async fn main(_spawner: embassy_executor::Spawner) {
     use embassy_time::{Duration, Ticker};
-    use potok_m_firmware::{step, watchdog::setup_iwdg, LinkState, PhaseFsm, StepResult};
+    use potok_m_firmware::{
+        interlocks::Interlocks,
+        step,
+        watchdog::{setup_iwdg, WatchdogPolicy},
+        LinkState, PhaseFsm, StepResult,
+    };
 
     use defmt_rtt as _;
     let p = embassy_stm32::init(Default::default());
@@ -118,18 +123,34 @@ async fn main(_spawner: embassy_executor::Spawner) {
     let mut board = hw::build_board(wd);
     let mut fsm = PhaseFsm::new();
     let mut link = LinkState::new();
+    // Independent safety gates live in the shipping loop, not just in SIL.
+    let mut interlock = Interlocks::default();
+    let mut policy = WatchdogPolicy::new();
     let mut ticker = Ticker::every(Duration::from_millis(2)); // 500 Hz
 
     loop {
         ticker.next().await;
-        match step(&mut board, &mut fsm, &mut link, true) {
+        match step(
+            &mut board,
+            &mut fsm,
+            &mut link,
+            &mut interlock,
+            &mut policy,
+            true,
+        ) {
             StepResult::FrameRejected => defmt::warn!("reply frame rejected"),
             StepResult::Accepted(cmd) if cmd.is_zero() => defmt::info!("zero command"),
             StepResult::Accepted(_) => defmt::info!("AI command applied"),
             StepResult::Idle => {}
         }
-        if link.is_disabled() {
+        if link.is_disabled() || policy.ai_latched() {
             defmt::warn!("AI latched off; explicit reset required");
+        }
+        if interlock.latched().is_some() {
+            defmt::warn!("independent interlock latched; explicit reset required");
+        }
+        if policy.deadman().tripped() {
+            defmt::warn!("control deadline monitor tripped; watchdog feed withheld");
         }
     }
 }

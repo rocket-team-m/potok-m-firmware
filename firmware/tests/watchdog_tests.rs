@@ -6,7 +6,7 @@
 use potok_m_firmware::{
     mock::MockBoard,
     phase::PhaseFsm,
-    step,
+    step_link,
     watchdog::{
         may_feed, FeedDecision, Severity, SoftwareDeadman, WatchdogPolicy, CONTROL_PERIOD_US,
         DEADLINE_LIMIT, DEADLINE_SLACK_US, WATCHDOG_TIMEOUT_US,
@@ -52,9 +52,9 @@ fn control_loop_is_the_only_feed_path_in_the_real_step() {
     let mut fsm = PhaseFsm::new();
     let mut link = LinkState::new();
 
-    step(&mut board, &mut fsm, &mut link, false);
+    step_link(&mut board, &mut fsm, &mut link, false);
     assert_eq!(board.pets(), 0, "an incomplete cycle must not pet the WDT");
-    step(&mut board, &mut fsm, &mut link, true);
+    step_link(&mut board, &mut fsm, &mut link, true);
     assert_eq!(
         board.pets(),
         1,
