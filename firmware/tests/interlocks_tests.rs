@@ -262,3 +262,167 @@ fn unusable_configuration_is_a_loud_error() {
         ..Limits::DEFAULT
     });
 }
+
+// --- Runtime shield: deterministic Mach/pitot gate outside the learner. ---
+
+/// Airspeed evidence used in every shield test: a positive pitot differential
+/// (Pa) and a Mach estimate below the configured default ceiling.
+const PITOT_OK: i16 = 12_000;
+const MACH_OK: f32 = 0.4;
+
+#[test]
+fn mach_limit_defaults_to_the_flight_ceiling() {
+    assert_eq!(Limits::DEFAULT.mach_limit, 0.6);
+    assert_eq!(gate().limits(), Limits::DEFAULT);
+}
+
+#[test]
+fn mach_above_limit_zeroes_the_command_with_a_reason_and_no_latch() {
+    let mut g = gate();
+    let d = g.evaluate_shield(input(Phase::COAST, 100, 100, 0), PITOT_OK, 0.7);
+    assert_eq!(d.command, Interlocks::FAILSAFE);
+    assert!(!d.permitted);
+    assert_eq!(d.refusal, Some(Refusal::MachLimit));
+    assert_eq!(g.latched(), None, "Mach overspeed is transient, not a fault");
+    assert_eq!(g.counters.mach_blocked, 1);
+    assert_eq!(g.counters.accepted, 0);
+    assert!(g.last_command().is_zero());
+
+    // Once the estimate falls, the gate reopens without a reset; the slew
+    // starts from zero because the refused tick never fed the rate limiter.
+    let d = g.evaluate_shield(input(Phase::COAST, 100, 100, 1_000), PITOT_OK, 0.5);
+    assert!(d.permitted);
+    assert_eq!(d.refusal, None);
+    assert_eq!(d.command, Command { pitch: 10, yaw: 10 });
+}
+
+#[test]
+fn mach_exactly_at_the_limit_is_accepted() {
+    let mut g = gate();
+    let d = g.evaluate_shield(input(Phase::COAST, 100, 0, 0), PITOT_OK, 0.6);
+    assert!(d.permitted, "the gate is `>`, so 0.6 exactly is still legal");
+    assert_eq!(d.refusal, None);
+    assert_eq!(d.command, Command { pitch: 10, yaw: 0 });
+    assert_eq!(g.counters.mach_blocked, 0);
+}
+
+#[test]
+fn non_finite_mach_latches_until_reset() {
+    let mut g = gate();
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let d = g.evaluate_shield(input(Phase::COAST, 50, 50, 0), PITOT_OK, bad);
+        assert_eq!(d.command, Interlocks::FAILSAFE);
+        assert_eq!(d.refusal, Some(Refusal::NonFiniteMach));
+        assert_eq!(g.latched(), Some(Refusal::NonFiniteMach));
+
+        // A good measurement cannot clear the latch.
+        let d = g.evaluate_shield(input(Phase::COAST, 50, 50, 1_000), PITOT_OK, MACH_OK);
+        assert!(!d.permitted);
+        assert_eq!(d.refusal, Some(Refusal::NonFiniteMach));
+
+        g.reset();
+        assert_eq!(g.latched(), None);
+    }
+    assert_eq!(g.counters.trips, 3);
+}
+
+#[test]
+fn non_positive_pitot_blocks_without_latching() {
+    let mut g = gate();
+    for dp in [0i16, -1, i16::MIN] {
+        let d = g.evaluate_shield(input(Phase::COAST, 50, 0, 0), dp, MACH_OK);
+        assert_eq!(d.command, Interlocks::FAILSAFE);
+        assert_eq!(d.refusal, Some(Refusal::PitotInvalid));
+        assert_eq!(g.latched(), None);
+    }
+
+    let d = g.evaluate_shield(input(Phase::COAST, 50, 0, 1_000), 1, MACH_OK);
+    assert!(d.permitted);
+    assert_eq!(d.command, Command { pitch: 10, yaw: 0 });
+}
+
+#[test]
+fn shield_keeps_the_existing_phase_and_health_gates_in_front() {
+    let mut g = gate();
+
+    // Unknown phase and boost both outrank a Mach violation.
+    let mut raw = input(Phase::COAST, 50, 50, 0);
+    raw.phase_code = 0xff;
+    let d = g.evaluate_shield(raw, PITOT_OK, 0.99);
+    assert_eq!(d.refusal, Some(Refusal::UnknownPhase(0xff)));
+    assert!(g.latched().is_some());
+    g.reset();
+
+    let d = g.evaluate_shield(input(Phase::BURN, 50, 50, 0), PITOT_OK, 0.99);
+    assert_eq!(d.refusal, Some(Refusal::Boost));
+    assert_eq!(g.latched(), None);
+
+    let mut armed = input(Phase::COAST, 50, 50, 0);
+    armed.flags = flags::MOTOR_ARMED;
+    let d = g.evaluate_shield(armed, PITOT_OK, f32::NAN);
+    assert_eq!(d.refusal, Some(Refusal::MotorArmed));
+
+    g.reset();
+    let mut sick = input(Phase::COAST, 50, 50, 0);
+    sick.ai_healthy = false;
+    let d = g.evaluate_shield(sick, PITOT_OK, f32::NAN);
+    assert_eq!(d.refusal, Some(Refusal::AiUnhealthy));
+
+    g.reset();
+    let mut faulty = input(Phase::COAST, 50, 50, 0);
+    faulty.flags = flags::FAULT;
+    let d = g.evaluate_shield(faulty, PITOT_OK, f32::NAN);
+    assert_eq!(d.refusal, Some(Refusal::Fault));
+}
+
+#[test]
+fn a_refusal_never_slews_or_advances_the_rate_history() {
+    let mut g = gate();
+    let d = g.evaluate_shield(input(Phase::COAST, 100, 0, 0), PITOT_OK, MACH_OK);
+    assert_eq!(d.command, Command { pitch: 10, yaw: 0 });
+    let slewed_before = g.counters.slewed;
+
+    let d = g.evaluate_shield(input(Phase::COAST, 100, 0, 1_000), PITOT_OK, 0.8);
+    assert_eq!(d.command, Command::ZERO);
+    assert!(!d.limited);
+    assert_eq!(g.last_command(), Command { pitch: 10, yaw: 0 });
+    assert_eq!(g.counters.slewed, slewed_before, "refusal must not slew");
+    assert_eq!(g.counters.accepted, 1);
+
+    // Recovery slews from the last accepted command, not from the refused one.
+    let d = g.evaluate_shield(input(Phase::COAST, 100, 0, 2_000), PITOT_OK, MACH_OK);
+    assert_eq!(d.command, Command { pitch: 20, yaw: 0 });
+}
+
+#[test]
+fn configured_mach_limit_is_enforced() {
+    let mut g = Interlocks::new(Limits {
+        mach_limit: 0.3,
+        ..Limits::DEFAULT
+    });
+    assert_eq!(
+        g.evaluate_shield(input(Phase::COAST, 50, 0, 0), PITOT_OK, 0.35).refusal,
+        Some(Refusal::MachLimit)
+    );
+    assert!(g
+        .evaluate_shield(input(Phase::COAST, 50, 0, 1_000), PITOT_OK, 0.25)
+        .permitted);
+}
+
+#[test]
+#[should_panic(expected = "mach_limit must be finite and positive")]
+fn non_finite_mach_limit_is_a_loud_error() {
+    let _ = Interlocks::new(Limits {
+        mach_limit: f32::NAN,
+        ..Limits::DEFAULT
+    });
+}
+
+#[test]
+#[should_panic(expected = "mach_limit must be finite and positive")]
+fn zero_mach_limit_is_a_loud_error() {
+    let _ = Interlocks::new(Limits {
+        mach_limit: 0.0,
+        ..Limits::DEFAULT
+    });
+}

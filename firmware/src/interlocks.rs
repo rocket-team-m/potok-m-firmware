@@ -14,6 +14,13 @@
 //! zero the output only while they hold, so burnout re-enables guidance
 //! without a reset. A plausible command that simply moves too fast is slewed,
 //! never jumped to.
+//!
+//! [`Interlocks::evaluate_shield`] adds the runtime Mach gate on top of these
+//! finite-state checks: it takes the measured pitot dynamic pressure and the
+//! caller's Mach estimate and zeroes the command with a reason code when the
+//! estimate is non-finite, the pitot is unusable, or Mach exceeds
+//! [`Limits::mach_limit`]. It is a post-posed shield outside the learner — a
+//! refusal is never traded for a smaller command.
 
 use potok_protocol::{flags, Phase};
 
@@ -38,6 +45,13 @@ pub enum Refusal {
     Fault,
     /// Command outside the plausible range. Latching.
     Implausible,
+    /// Mach estimate is NaN or infinite. Latching: a fault, not a condition.
+    NonFiniteMach,
+    /// Pitot dynamic pressure is non-positive, so there is no airspeed
+    /// evidence to gate on. Transient.
+    PitotInvalid,
+    /// Estimated Mach exceeds the configured limit. Transient.
+    MachLimit,
 }
 
 impl Refusal {
@@ -45,14 +59,18 @@ impl Refusal {
     pub const fn latches(self) -> bool {
         matches!(
             self,
-            Self::UnknownPhase(_) | Self::AiUnhealthy | Self::Fault | Self::Implausible
+            Self::UnknownPhase(_)
+            | Self::AiUnhealthy
+            | Self::Fault
+            | Self::Implausible
+            | Self::NonFiniteMach
         )
     }
 }
 
 /// Tunable gates. Defaults are the flight recipe: raw units are 0.001 rad,
 /// so 100 raw is the model's 0.1 rad bound.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Limits {
     /// Absolute per-axis bound on a plausible command, in raw units.
     pub max_command: i16,
@@ -61,6 +79,9 @@ pub struct Limits {
     /// Shortest time between two command changes, in microseconds. Must be
     /// well below 2^31 so the wrapping subtraction in `evaluate` is sound.
     pub min_interval_us: u32,
+    /// Hard Mach ceiling for the runtime shield. An estimate above this zeroes
+    /// the command; there is no soft tradeoff band.
+    pub mach_limit: f32,
 }
 
 impl Limits {
@@ -68,6 +89,7 @@ impl Limits {
         max_command: 100,
         max_delta: 10,
         min_interval_us: 1_000,
+        mach_limit: 0.6,
     };
 }
 
@@ -111,6 +133,8 @@ pub struct Counters {
     pub blocked: u32,
     pub trips: u32,
     pub resets: u32,
+    /// Ticks zeroed by the Mach limit (transient refusals, not trips).
+    pub mach_blocked: u32,
 }
 
 /// Stateless-in-the-large interlock: only the latch, the last accepted command
@@ -136,6 +160,10 @@ impl Interlocks {
             limits.min_interval_us < 1 << 31,
             "min_interval_us must fit the wrapping clock comparison"
         );
+        assert!(
+            limits.mach_limit > 0.0 && limits.mach_limit < f32::INFINITY,
+            "mach_limit must be finite and positive"
+        );
         Self {
             limits,
             latch: None,
@@ -148,6 +176,7 @@ impl Interlocks {
                 blocked: 0,
                 trips: 0,
                 resets: 0,
+                mach_blocked: 0,
             },
         }
     }
@@ -168,30 +197,70 @@ impl Interlocks {
     /// new input, phase/health faults outrank the command, and rate limiting
     /// only ever applies to a command that passed all of the above.
     pub fn evaluate(&mut self, input: Input) -> Decision {
-        if let Some(reason) = self.latch {
-            return self.blocked(reason);
+        if let Some(decision) = self.preflight(input) {
+            return decision;
         }
+        self.accept(input)
+    }
 
+    /// Runtime shield: the interlock checks plus the Mach/pitot gate. `pitot_dp`
+    /// is the measured pitot dynamic pressure in Pa; `mach_est` is the Mach
+    /// estimate the caller derives from it (and static pressure) before this
+    /// call. The gate uses comparisons and finiteness checks only — no `libm`,
+    /// no host sync, deterministic on `no_std`. Every refusal is a zero command
+    /// with a reason code; no measurement is ever traded for a smaller command.
+    ///
+    /// This is a *command* gate: it stops AI output above the limit, it does
+    /// not bound the vehicle's Mach. If thrust drives M past the limit, no
+    /// controller with these actuators can bring it back (design finding in
+    /// `docs/RUNTIME_SHIELD.md`).
+    pub fn evaluate_shield(&mut self, input: Input, pitot_dp: i16, mach_est: f32) -> Decision {
+        if let Some(decision) = self.preflight(input) {
+            return decision;
+        }
+        if !mach_est.is_finite() {
+            return self.trip(Refusal::NonFiniteMach);
+        }
+        if pitot_dp <= 0 {
+            return self.blocked(Refusal::PitotInvalid);
+        }
+        if mach_est > self.limits.mach_limit {
+            self.counters.mach_blocked += 1;
+            return self.blocked(Refusal::MachLimit);
+        }
+        self.accept(input)
+    }
+
+    /// Finite-state gates shared by `evaluate` and `evaluate_shield`. None of
+    /// them may be skipped by the shield, so they are factored out once.
+    fn preflight(&mut self, input: Input) -> Option<Decision> {
+        if let Some(reason) = self.latch {
+            return Some(self.blocked(reason));
+        }
         let phase = match Phase::try_from(input.phase_code) {
             Ok(phase) => phase,
-            Err(code) => return self.trip(Refusal::UnknownPhase(code)),
+            Err(code) => return Some(self.trip(Refusal::UnknownPhase(code))),
         };
         if phase == Phase::BURN {
-            return self.blocked(Refusal::Boost);
+            return Some(self.blocked(Refusal::Boost));
         }
         if input.flags & flags::MOTOR_ARMED != 0 {
-            return self.blocked(Refusal::MotorArmed);
+            return Some(self.blocked(Refusal::MotorArmed));
         }
         if !input.ai_healthy {
-            return self.trip(Refusal::AiUnhealthy);
+            return Some(self.trip(Refusal::AiUnhealthy));
         }
         if input.flags & flags::FAULT != 0 {
-            return self.trip(Refusal::Fault);
+            return Some(self.trip(Refusal::Fault));
         }
+        None
+    }
+
+    /// Command plausibility and rate limiting, after every safety gate passed.
+    fn accept(&mut self, input: Input) -> Decision {
         if !self.plausible(input.requested) {
             return self.trip(Refusal::Implausible);
         }
-
         let next = self.rate_limit(input.requested, input.now_us);
         self.counters.accepted += 1;
         Decision {
