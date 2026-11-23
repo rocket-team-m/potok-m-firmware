@@ -11,8 +11,15 @@
 #[cfg(not(target_os = "none"))]
 fn main() {}
 
+/// The typed pitot/static seam lives beside this adapter. No pin is claimed
+/// here: the board implements `Airdata`, the sampler derives Mach from it.
+#[cfg(target_os = "none")]
+#[path = "shield_sample.rs"]
+mod shield_sample;
+
 #[cfg(target_os = "none")]
 mod hw {
+    use crate::shield_sample::Airdata;
     use embassy_stm32::mode::Async;
     use embassy_stm32::usart::{UartRx, UartTx};
     use potok_m_firmware::{
@@ -98,6 +105,18 @@ mod hw {
             let _ = cmd;
         }
     }
+
+    impl Airdata for HwBoard<'static> {
+        fn pitot_dp_pa(&self) -> Option<f32> {
+            // TODO(schematic): pitot differential-pressure driver. No pin is
+            // claimed here; until it exists the reading is absent, not zero.
+            None
+        }
+        fn static_pa(&self) -> Option<f32> {
+            // TODO(schematic): barometric static-pressure driver. Same rule.
+            None
+        }
+    }
 }
 
 #[cfg(target_os = "none")]
@@ -112,12 +131,13 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 async fn main(_spawner: embassy_executor::Spawner) {
     use embassy_time::{Duration, Ticker};
     use potok_m_firmware::{
-        control::ShieldSample,
         interlocks::Interlocks,
         step,
         watchdog::{setup_iwdg, WatchdogPolicy},
         LinkState, PhaseFsm, StepResult,
     };
+
+    use crate::shield_sample::ShieldSampler;
 
     use defmt_rtt as _;
     let p = embassy_stm32::init(Default::default());
@@ -128,20 +148,12 @@ async fn main(_spawner: embassy_executor::Spawner) {
     // Independent safety gates live in the shipping loop, not just in SIL.
     let mut interlock = Interlocks::default();
     let mut policy = WatchdogPolicy::new();
+    let mut sampler = ShieldSampler::new();
     let mut ticker = Ticker::every(Duration::from_millis(2)); // 500 Hz
-
-    /// The shield's airdata seam. One place to swap in the real pitot/static
-    /// drivers when the schematic is filled in; no new pin is claimed here.
-    fn shield_sample(_board: &hw::HwBoard<'static>) -> ShieldSample {
-        // TODO(schematic): read pitot dynamic pressure and derive Mach from it
-        // plus static pressure. Until then the honest sample is UNAVAILABLE,
-        // which the shield vetoes with PitotInvalid: zero command.
-        ShieldSample::UNAVAILABLE
-    }
 
     loop {
         ticker.next().await;
-        link.set_shield_sample(shield_sample(&board));
+        link.set_shield_sample(sampler.sample(&board));
         match step(
             &mut board,
             &mut fsm,
@@ -151,12 +163,18 @@ async fn main(_spawner: embassy_executor::Spawner) {
             true,
         ) {
             StepResult::FrameRejected => defmt::warn!("reply frame rejected"),
-            StepResult::Accepted(cmd) if cmd.is_zero() => defmt::info!(
-                "zero command (shield: mach={} pitot={} nonfinite={})",
-                link.shield_reasons.mach_limit,
-                link.shield_reasons.pitot_invalid,
-                link.shield_reasons.non_finite_mach
-            ),
+            StepResult::Accepted(cmd) if cmd.is_zero() => {
+                let u = sampler.unavailable_counts();
+                defmt::info!(
+                    "zero command (shield: mach={} pitot={} nonfinite={} airdata: nodrv={} nonfin={} nonpos={})",
+                    link.shield_reasons.mach_limit,
+                    link.shield_reasons.pitot_invalid,
+                    link.shield_reasons.non_finite_mach,
+                    u.no_driver,
+                    u.non_finite,
+                    u.non_positive
+                );
+            }
             StepResult::Accepted(_) => defmt::info!("AI command applied"),
             StepResult::Idle => {}
         }
