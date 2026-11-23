@@ -156,13 +156,16 @@ probe-rs run --chip STM32H743ZI \
 (FLASH 2048K @ `0x08000000`, RAM 128K @ `0x20000000`) и такт time-driver'а
 (`TIM2`) должны быть сверены с BOM **до** первого включения.
 
-CI — два обязательных workflow на `ubuntu-latest`, оба с toolchain
+CI — три обязательных workflow на `ubuntu-latest`, все с toolchain
 `dtolnay/rust-toolchain@stable`:
 
 - [`ci.yml`](.github/workflows/ci.yml): `host` — `fmt`, `clippy -D warnings`,
   `cargo test --workspace`; `thumb` — `cargo check --target thumbv7em-none-eabihf`.
 - [`sil.yml`](.github/workflows/sil.yml): `sil` — полный хостовый прогон, два
   фокусных ре-рана (wire-фолты и тайминг/watchdog) и `thumb no_std check`.
+- [`renode.yml`](.github/workflows/renode.yml): `smoke` — хост-контракт
+  `renode_smoke`, сборка отдельного `thumb`-ELF и прогон в Renode (эмулятор,
+  не плата); границы и запуск — в [`docs/RENODE.md`](docs/RENODE.md).
 
 Тот же SIL-прогон локально перед платой — четыре команды из
 [`docs/SIL.md`](docs/SIL.md):
@@ -182,7 +185,7 @@ UART: 2 Мбит/с, 8N1, DMA в обе стороны, путь к Raspberry Pi
 
 ## <span style="color:#a78bfa">06</span> / Тесты безопасности
 
-**216 хостовых гейтов в 22 интеграционных бинарниках** (`firmware/tests/`) —
+**303 хостовых гейта в 30 интеграционных бинарниках** (`firmware/tests/`) —
 результат `cargo test --workspace` на момент этого коммита. Все гоняются на
 `MockBoard`, без платы, без Embassy и без аллокатора. Десять канонических
 гейтов безопасности живут в [`firmware/tests/safety.rs`](firmware/tests/safety.rs)
@@ -191,11 +194,14 @@ UART: 2 Мбит/с, 8N1, DMA в обе стороны, путь к Raspberry Pi
 | Группа | Тестов | Что покрывает |
 |---|---:|---|
 | Безопасность — `safety.rs` | 10 | Таблица ниже: CRC, seq, BURN и `MOTOR_ARMED`, три промаха, watchdog, assembler, FSM. |
-| SIL — `sil_tests.rs` | 12 | Детерминированные скрипты 500 Гц через [`sil.rs`](firmware/src/sil.rs): трасса, интерлок в пути привода, отказы link'а. |
-| Wire и логи — `protocol_link`, `watchguard`, `fault_inject`, `replay`, `telemetry_log` | 42 | Повторная подача кадра, фолт-инъекция, seq wrap, журнал и replay. |
-| Фаза и управление — `phase_fsm`, `control_pid`, `attitude`, `interlocks` | 38 | Автомат, PID, фиксированная точка/Q15, независимый гейт. |
+| SIL — `sil_tests.rs` | 22 | Детерминированные скрипты 500 Гц через [`sil.rs`](firmware/src/sil.rs): трасса, интерлок в пути привода, отказы link'а. |
+| Wire и логи — `protocol_link`, `watchguard`, `fault_inject`, `replay`, `telemetry_log` | 61 | Повторная подача кадра, фолт-инъекция, seq wrap, журнал и replay. |
+| Фаза и управление — `phase_fsm`, `control_pid`, `attitude`, `interlocks` | 50 | Автомат, PID, фиксированная точка/Q15, независимый гейт. |
 | Последователи и борт — `deployment`, `separation`, `sensor_voting`, `search_beacon`, `buzzer`, `self_test`, `calibration_table` | 80 | Разделение ступеней, голосование датчиков, маяк, self-test, калибровка. |
-| Тайминг — `perf`, `scheduler`, `watchdog`, `timing_budget` | 34 | Бюджет цикла 24 000 тактов, сетка 500 Гц, край срабатывания watchdog. |
+| Тайминг — `perf`, `scheduler`, `watchdog`, `timing_budget` | 37 | Бюджет цикла 24 000 тактов, сетка 500 Гц, край срабатывания watchdog. |
+| Профили и аэроданные — `profile_tests`, `shield_sample_tests` | 24 | Типовые рантайм-профили; питот/статик, Mach, счётчики UNAVAILABLE и сэмпл в `evaluate_shield`. |
+| Полётный путь — `production_safety`, `flight_path_tests` | 16 | Настоящий `step()` с интерлоком и watchguard; каждый чистый модуль вызван, отказ посчитан с причиной. |
+| Эмулятор — `renode_smoke` | 3 | Хост-контракт Renode: no-panic board и маркерный протокол. |
 
 ### SIL
 
