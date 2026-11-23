@@ -159,6 +159,83 @@ pub trait Storage {
     fn write_records<const SZ: usize>(&mut self, records: &[[u8; SZ]]) -> Result<(), Self::Error>;
 }
 
+/// A bounded write could not be accepted. Nothing was stored; the caller
+/// keeps the records and may retry after draining the sink.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageError {
+    Full,
+}
+
+/// Heap-free `Storage` sink over a fixed byte buffer. A write that does not
+/// fit is refused and counted — never partially stored, never silently
+/// dropped — so [`FlightLogger::flush`] keeps the frames for a later retry.
+#[derive(Clone, Copy, Debug)]
+pub struct BoundedSink<const CAP: usize> {
+    bytes: [u8; CAP],
+    len: usize,
+    writes: u32,
+    refused: u32,
+}
+
+impl<const CAP: usize> BoundedSink<CAP> {
+    pub const fn new() -> Self {
+        assert!(CAP > 0, "telemetry sink needs at least one byte");
+        Self {
+            bytes: [0; CAP],
+            len: 0,
+            writes: 0,
+            refused: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
+    pub const fn writes(&self) -> u32 {
+        self.writes
+    }
+
+    /// Writes refused because the sink lacked room. The records stayed in the
+    /// logger's ring; this count is the loud signal that storage is full.
+    pub const fn refused(&self) -> u32 {
+        self.refused
+    }
+}
+
+impl<const CAP: usize> Default for BoundedSink<CAP> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const CAP: usize> Storage for BoundedSink<CAP> {
+    type Error = StorageError;
+
+    fn write_records<const SZ: usize>(&mut self, records: &[[u8; SZ]]) -> Result<(), Self::Error> {
+        let needed = records.len().checked_mul(SZ).ok_or(StorageError::Full)?;
+        let end = self.len.checked_add(needed).ok_or(StorageError::Full)?;
+        if end > CAP {
+            self.refused += 1;
+            return Err(StorageError::Full);
+        }
+        for record in records {
+            self.bytes[self.len..self.len + SZ].copy_from_slice(record);
+            self.len += SZ;
+        }
+        self.writes += 1;
+        Ok(())
+    }
+}
+
 /// Static-capacity ring of serialized flight records. `N` is the number of
 /// retained records, `SZ` the byte size of each one (header + payload + CRC).
 #[derive(Clone, Copy, Debug)]

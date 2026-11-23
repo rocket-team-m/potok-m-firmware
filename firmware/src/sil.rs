@@ -1328,7 +1328,10 @@ pub mod full {
                     encode_reply(&reply, &mut bytes).expect("sil: scripted reply must encode");
                     bytes[byte] ^= mask;
                 }
-                Frame::Raw { bytes: raw, len: raw_len } => {
+                Frame::Raw {
+                    bytes: raw,
+                    len: raw_len,
+                } => {
                     assert!(raw_len <= REPLY_SIZE, "sil: raw frame longer than a reply");
                     bytes[..raw_len].copy_from_slice(&raw[..raw_len]);
                     len = raw_len;
@@ -1409,7 +1412,10 @@ pub mod full {
             ) {
                 emissions |= EMIT_AI_OFF;
             }
-            if latch_entered(&mut self.gates.interlock_off, self.interlock.latched().is_some()) {
+            if latch_entered(
+                &mut self.gates.interlock_off,
+                self.interlock.latched().is_some(),
+            ) {
                 emissions |= EMIT_INTERLOCK_OFF;
             }
             if latch_entered(&mut self.gates.deadman, self.policy.deadman().tripped()) {
@@ -1480,7 +1486,10 @@ pub mod full {
                 REACH_SELF_TEST,
                 capabilities.used[Capability::SelfTest as usize] > 0,
             );
-            self.note(REACH_RADIO, capabilities.used[Capability::Radio as usize] > 0);
+            self.note(
+                REACH_RADIO,
+                capabilities.used[Capability::Radio as usize] > 0,
+            );
             self.note(
                 REACH_INTERLOCK,
                 self.interlock.counters.accepted
@@ -1501,7 +1510,11 @@ pub mod full {
             self.tick_index = self.tick_index.wrapping_add(1);
         }
 
-        pub fn run<const CAP: usize>(&mut self, ticks: &[FlightTick], trace: &mut FlightTrace<CAP>) {
+        pub fn run<const CAP: usize>(
+            &mut self,
+            ticks: &[FlightTick],
+            trace: &mut FlightTrace<CAP>,
+        ) {
             for tick in ticks {
                 self.tick(tick, trace);
             }

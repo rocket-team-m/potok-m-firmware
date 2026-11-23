@@ -8,6 +8,7 @@
 //! reaches `Board::apply_command`, and that a missed deadline stops feeding.
 
 use potok_m_firmware::{
+    control::ShieldSample,
     interlocks::{Interlocks, Refusal},
     mock::MockBoard,
     phase::{PhaseEvent, PhaseFsm},
@@ -65,6 +66,10 @@ impl Rig {
         if let Some(frame) = frame {
             self.board.queue_reply(&frame);
         }
+        // These gates exercise the link/interlock/deadline path, not the pitot
+        // shield. Supply the seam explicitly: the shipping default is now
+        // UNAVAILABLE, so a permissive sample is never inherited silently.
+        self.link.set_shield_sample(ShieldSample::LEGACY_NO_SENSOR);
         step(
             &mut self.board,
             &mut self.fsm,

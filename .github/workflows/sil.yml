@@ -28,4 +28,6 @@ jobs:
         run: cargo test --test perf_tests --test scheduler_tests --test watchdog_tests --test timing_budget_tests
 
       - name: thumb no_std check
-        run: cargo check --target thumbv7em-none-eabihf
+        # Pin the rustup stable toolchain: it carries the thumb core, while a
+        # runner's default cargo/rustc may fail with E0463 (no `core`).
+        run: rustup run stable cargo check --target thumbv7em-none-eabihf

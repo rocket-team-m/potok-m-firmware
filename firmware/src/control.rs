@@ -158,7 +158,7 @@ impl LinkState {
                 rejected: 0,
                 disables: 0,
             },
-            shield_sample: ShieldSample::LEGACY_NO_SENSOR,
+            shield_sample: ShieldSample::UNAVAILABLE,
             shield_reasons: ReasonCounts::EMPTY,
         }
     }

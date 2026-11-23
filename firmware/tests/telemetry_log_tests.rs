@@ -6,8 +6,8 @@
 mod telemetry_log;
 
 use telemetry_log::{
-    decode_record, encode_record, Cadence, Emission, EncodeError, FlightLogger, LogGate, Replay,
-    ReplayError, HEADER_LEN, LOG_MAGIC, MIN_RECORD_SIZE,
+    decode_record, encode_record, BoundedSink, Cadence, Emission, EncodeError, FlightLogger,
+    LogGate, Replay, ReplayError, StorageError, HEADER_LEN, LOG_MAGIC, MIN_RECORD_SIZE,
 };
 
 const SZ: usize = 20;
@@ -49,6 +49,41 @@ fn seqs(storage: &RecordingStorage) -> Vec<u32> {
     Replay::<SZ>::new(&storage.bytes)
         .map(|record| record.unwrap().seq)
         .collect()
+}
+
+#[test]
+fn bounded_sink_stores_replayable_frames_and_counts_writes() {
+    let mut sink = BoundedSink::<64>::new();
+    let frames = [frame(1, 10, 1, b"a"), frame(2, 20, 2, b"b")];
+    telemetry_log::Storage::write_records(&mut sink, &frames).unwrap();
+    assert_eq!(sink.writes(), 1);
+    assert_eq!(sink.refused(), 0);
+    assert_eq!(sink.len(), 2 * SZ);
+    let seqs: Vec<u32> = Replay::<SZ>::new(sink.as_bytes())
+        .map(|r| r.unwrap().seq)
+        .collect();
+    assert_eq!(seqs, vec![1, 2]);
+}
+
+#[test]
+fn bounded_sink_refuses_full_writes_without_losing_logger_records() {
+    // Room for exactly one frame: a two-frame batch is refused, not dropped.
+    let mut sink = BoundedSink::<SZ>::new();
+    let mut logger = FlightLogger::<4, SZ>::new();
+    logger.push(10, 1, 0, b"a").unwrap();
+    logger.push(20, 1, 0, b"b").unwrap();
+    assert_eq!(logger.flush::<2, _>(&mut sink), Err(StorageError::Full));
+    assert!(sink.is_empty());
+    assert_eq!(sink.refused(), 1);
+    assert_eq!(sink.writes(), 0);
+    assert_eq!(logger.len(), 2, "a failed flush keeps records for retry");
+
+    let mut ok = BoundedSink::<64>::new();
+    assert_eq!(logger.flush::<2, _>(&mut ok), Ok(2));
+    let seqs: Vec<u32> = Replay::<SZ>::new(ok.as_bytes())
+        .map(|r| r.unwrap().seq)
+        .collect();
+    assert_eq!(seqs, vec![0, 1]);
 }
 
 #[test]
