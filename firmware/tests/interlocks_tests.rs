@@ -435,3 +435,45 @@ fn zero_mach_limit_is_a_loud_error() {
         ..Limits::DEFAULT
     });
 }
+
+// --- Single evaluated gate: classification and refusal priority. ---
+
+#[test]
+fn every_phase_code_classifies_like_the_reference_enum() {
+    for code in 0u8..=255 {
+        let mut raw = input(Phase::COAST, 0, 0, 0);
+        raw.phase_code = code;
+        let refusal = gate().evaluate(raw).refusal;
+        match Phase::try_from(code) {
+            Err(_) => assert_eq!(refusal, Some(Refusal::UnknownPhase(code))),
+            Ok(Phase::BURN) => assert_eq!(refusal, Some(Refusal::Boost)),
+            Ok(_) => assert_eq!(refusal, None),
+        }
+    }
+}
+
+#[test]
+fn stacked_gate_inputs_resolve_in_the_documented_priority() {
+    let mut g = gate();
+
+    // Phase gates outrank both flags and health.
+    let mut boost = input(Phase::BURN, 50, 50, 0);
+    boost.flags = flags::MOTOR_ARMED | flags::FAULT;
+    boost.ai_healthy = false;
+    assert_eq!(g.evaluate(boost).refusal, Some(Refusal::Boost));
+    assert_eq!(g.latched(), None);
+
+    // Motor sense outranks health and FAULT, and does not latch.
+    let mut armed = input(Phase::COAST, 50, 50, 0);
+    armed.flags = flags::MOTOR_ARMED | flags::FAULT;
+    armed.ai_healthy = false;
+    assert_eq!(g.evaluate(armed).refusal, Some(Refusal::MotorArmed));
+    assert_eq!(g.latched(), None);
+
+    // Health outranks FAULT.
+    g.reset();
+    let mut sick = input(Phase::COAST, 50, 50, 0);
+    sick.flags = flags::FAULT;
+    sick.ai_healthy = false;
+    assert_eq!(g.evaluate(sick).refusal, Some(Refusal::AiUnhealthy));
+}

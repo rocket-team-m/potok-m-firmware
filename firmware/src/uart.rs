@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! UART/DMA adapter boundary. Traits keep framing and control independent of
 //! the HAL; the mock implementation is used by host tests.
 
@@ -15,6 +16,15 @@ pub enum UartError {
 pub trait DoubleBufferRx {
     /// `Ok(None)` means no frame buffer is ready yet.
     fn take(&mut self, out: &mut [u8]) -> Result<Option<usize>, UartError>;
+}
+
+/// Zero-copy counterpart to [`DoubleBufferRx`]. Borrow the published DMA slot
+/// instead of copying it into a caller-owned scratch buffer: a caller that
+/// feeds a frame assembler from this slice performs one data move, not two.
+pub trait ZeroCopyRx {
+    /// Borrow the next published DMA chunk. `None` means nothing is ready.
+    /// The borrow stays valid until the next `take_borrowed` on this receiver.
+    fn take_borrowed(&mut self) -> Result<Option<&[u8]>, UartError>;
 }
 
 /// Request transmitter. Hardware implementations await the DMA write; the

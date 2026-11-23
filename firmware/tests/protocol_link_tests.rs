@@ -12,13 +12,18 @@ mod protocol_link;
 
 use crate::{
     phase::PhaseEvent,
-    protocol::{encode_reply, flags, Phase, ReplyFrame, REPLY_SIZE, REQUEST_SIZE},
-    uart::{DoubleBufferRx, UartError},
+    protocol::{
+        decode_reply, encode_reply, encode_request, flags, Phase, ReplyAssembler, ReplyFrame,
+        RequestFrame, REPLY_SIZE, REQUEST_SIZE,
+    },
+    uart::{DoubleBufferRx, UartError, ZeroCopyRx},
 };
 use potok_m_firmware::mock::{MockTx, MockWatchdog};
 use potok_protocol::{decode_request, REPLY_VERSION};
 
-use protocol_link::{DmaDoubleBufferRx, ProtocolLink, SensorSample};
+use protocol_link::{
+    DmaDoubleBufferRx, LockedReplyAssembler, ProtocolLink, RequestTemplate, SensorSample,
+};
 
 /// Host board whose receive path is the real DMA adapter. No pin, UART or DMA
 /// stream is named: only the `Board` trait and static buffers.
@@ -290,4 +295,143 @@ fn bad_frames_latch_and_reset_clears_only_the_latch() {
         Phase::COAST,
         "reset must not rewind the phase"
     );
+}
+
+// --- Zero-copy RX, locked-length assembly, reusable request template. ---
+
+#[test]
+fn dma_zero_copy_borrow_delivers_the_published_slot() {
+    let mut rx = DmaDoubleBufferRx::<REPLY_SIZE>::new();
+    assert_eq!(rx.take_borrowed().unwrap(), None);
+
+    let bytes = [0xA5u8; 7];
+    rx.back()[..bytes.len()].copy_from_slice(&bytes);
+    rx.submit_back(bytes.len()).unwrap();
+    {
+        let borrowed = rx.take_borrowed().unwrap().unwrap();
+        assert_eq!(
+            borrowed, &bytes,
+            "borrow must expose the DMA bytes verbatim"
+        );
+    }
+    assert_eq!(rx.takes, 1);
+    assert_eq!(rx.swaps, 1);
+    assert_eq!(rx.pending(), None, "the borrowed slot was consumed");
+
+    let mut out = [0u8; REPLY_SIZE];
+    assert_eq!(rx.take(&mut out).unwrap(), None);
+}
+
+#[test]
+fn zero_copy_rx_feeds_the_locked_assembler_without_a_scratch_buffer() {
+    let mut board = TestBoard::new();
+    let expected = reply(3, 11, -12);
+    board.queue_reply(&expected);
+
+    let borrowed = board.rx.take_borrowed().unwrap().unwrap();
+    let mut assembler = LockedReplyAssembler::new();
+    let frame = assembler.push(borrowed).expect("one full reply frame");
+    assert_eq!(decode_reply(&frame).unwrap(), expected);
+    assert_eq!(board.rx.swaps, 1);
+}
+
+/// Feed identical chunks to both assemblers and compare every returned frame.
+fn compare_assemblers(bytes: &[u8], chunk: usize) -> Vec<Option<[u8; REPLY_SIZE]>> {
+    let mut reference = ReplyAssembler::new();
+    let mut locked = LockedReplyAssembler::new();
+    let mut out = Vec::new();
+    for part in bytes.chunks(chunk) {
+        let a = reference.push(part);
+        let b = locked.push(part);
+        assert_eq!(a, b, "locked path disagreed with the reference assembler");
+        out.push(a);
+    }
+    out
+}
+
+#[test]
+fn locked_assembler_matches_reference_on_frames_noise_and_splits() {
+    let mut first = [0u8; REPLY_SIZE];
+    encode_reply(&reply(7, 30, -40), &mut first).unwrap();
+    let mut second = [0u8; REPLY_SIZE];
+    encode_reply(&reply(8, 50, -60), &mut second).unwrap();
+
+    // Noise prefix, two back-to-back frames, then a false magic with garbage.
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&[0x11, 0x22, 0x33]);
+    bytes.extend_from_slice(&first);
+    bytes.extend_from_slice(&second);
+    bytes.extend_from_slice(&0x5250u16.to_le_bytes()); // REPLY_MAGIC
+    bytes.extend_from_slice(&[0xFF; REPLY_SIZE - 2]);
+
+    // The false magic is consumed as a bad-CRC frame. Both assemblers also
+    // drop the rest of a chunk when a frame completes, so the frame count
+    // depends on chunk size; every returned frame must still be one of these.
+    let mut garbage = [0xFFu8; REPLY_SIZE];
+    garbage[..2].copy_from_slice(&0x5250u16.to_le_bytes());
+    for chunk in [1, 2, 3, 5, REPLY_SIZE, bytes.len()] {
+        let frames: Vec<_> = compare_assemblers(&bytes, chunk)
+            .into_iter()
+            .flatten()
+            .collect();
+        assert!(!frames.is_empty(), "chunk size {chunk}");
+        for frame in frames {
+            assert!(
+                frame == first || frame == second || frame == garbage,
+                "unexpected frame at chunk size {chunk}"
+            );
+        }
+    }
+}
+
+#[test]
+fn locked_assembler_reset_matches_reference() {
+    let mut full = [0u8; REPLY_SIZE];
+    encode_reply(&reply(9, 60, -70), &mut full).unwrap();
+
+    let mut reference = ReplyAssembler::new();
+    let mut locked = LockedReplyAssembler::new();
+    assert_eq!(reference.push(&full[..5]), locked.push(&full[..5]));
+    reference.reset();
+    locked.reset();
+    assert_eq!(reference.push(&full), Some(full));
+    assert_eq!(locked.push(&full), Some(full));
+}
+
+#[test]
+fn request_template_matches_reference_and_never_rewrites_the_tail() {
+    let sensors = SensorSample {
+        gyro: [1.0, 2.0, 3.0],
+        accel: [4.0, 5.0, 6.0],
+        mag: [7.0, 8.0, 9.0],
+        height: 10.5,
+        pitot_dp: -11,
+    };
+    let mut template = RequestTemplate::new(sensors);
+    let tail = template.bytes()[12..54].to_vec();
+
+    for (seq, time_us, phase, flags) in [
+        (0, 0, Phase::BURN, 0),
+        (1, 0xDEAD_BEEF, Phase::COAST, 0x51),
+        (u16::MAX, u32::MAX, Phase::LANDED, u8::MAX),
+    ] {
+        template.encode(seq, time_us, phase, flags);
+        let frame = RequestFrame {
+            seq,
+            time_us,
+            phase,
+            version: potok_protocol::REQUEST_VERSION,
+            flags,
+            reserved: 0,
+            gyro: sensors.gyro,
+            accel: sensors.accel,
+            mag: sensors.mag,
+            height: sensors.height,
+            pitot_dp: sensors.pitot_dp,
+        };
+        let mut expected = [0u8; REQUEST_SIZE];
+        encode_request(&frame, &mut expected).unwrap();
+        assert_eq!(template.bytes(), &expected, "header patch must be exact");
+        assert_eq!(&template.bytes()[12..54], tail.as_slice());
+    }
 }

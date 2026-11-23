@@ -30,6 +30,49 @@ use crate::Command;
 /// the generated `Phase` enum is unknown and may never move an actuator.
 pub type PhaseCode = u8;
 
+/// Phase class packed into the low two bits of the evaluated gate. An unknown
+/// code fails closed; BURN is the transient boost refusal.
+const PHASE_UNKNOWN: u8 = 0;
+const PHASE_BOOST: u8 = 1;
+const PHASE_ALLOWED: u8 = 2;
+const PHASE_MASK: u8 = 0b11;
+
+const MOTOR_BIT: u8 = 1 << 2;
+const UNHEALTHY_BIT: u8 = 1 << 3;
+const FAULT_BIT: u8 = 1 << 4;
+
+/// Direct lookup by wire phase byte: one load replaces a `Phase::try_from` match
+/// plus the separate BURN comparison. Every undefined code stays `PHASE_UNKNOWN`.
+const fn build_phase_gate() -> [u8; 256] {
+    let mut table = [PHASE_UNKNOWN; 256];
+    let mut code = Phase::BURN as usize + 1;
+    while code <= Phase::LANDED as usize {
+        table[code] = PHASE_ALLOWED;
+        code += 1;
+    }
+    table[Phase::BURN as usize] = PHASE_BOOST;
+    table
+}
+
+const PHASE_GATE: [u8; 256] = build_phase_gate();
+
+/// Fold phase, motor sense, AI health and the FAULT bit into one status word.
+/// `flags` is loaded once here instead of once per gate.
+#[inline(always)]
+fn evaluated_gate(code: u8, flags: u8, ai_healthy: bool) -> u8 {
+    let mut gate = PHASE_GATE[code as usize];
+    if flags & flags::MOTOR_ARMED != 0 {
+        gate |= MOTOR_BIT;
+    }
+    if !ai_healthy {
+        gate |= UNHEALTHY_BIT;
+    }
+    if flags & flags::FAULT != 0 {
+        gate |= FAULT_BIT;
+    }
+    gate
+}
+
 /// Why a command was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -232,28 +275,24 @@ impl Interlocks {
     }
 
     /// Finite-state gates shared by `evaluate` and `evaluate_shield`. None of
-    /// them may be skipped by the shield, so they are factored out once.
+    /// them may be skipped by the shield. All four inputs are evaluated into a
+    /// single status word; one match resolves the refusal, in the same priority
+    /// order as before (phase, motor, health, fault).
     fn preflight(&mut self, input: Input) -> Option<Decision> {
         if let Some(reason) = self.latch {
             return Some(self.blocked(reason));
         }
-        let phase = match Phase::try_from(input.phase_code) {
-            Ok(phase) => phase,
-            Err(code) => return Some(self.trip(Refusal::UnknownPhase(code))),
-        };
-        if phase == Phase::BURN {
-            return Some(self.blocked(Refusal::Boost));
+        let gate = evaluated_gate(input.phase_code, input.flags, input.ai_healthy);
+        match gate {
+            g if g & PHASE_MASK == PHASE_UNKNOWN => {
+                Some(self.trip(Refusal::UnknownPhase(input.phase_code)))
+            }
+            g if g & PHASE_MASK == PHASE_BOOST => Some(self.blocked(Refusal::Boost)),
+            g if g & MOTOR_BIT != 0 => Some(self.blocked(Refusal::MotorArmed)),
+            g if g & UNHEALTHY_BIT != 0 => Some(self.trip(Refusal::AiUnhealthy)),
+            g if g & FAULT_BIT != 0 => Some(self.trip(Refusal::Fault)),
+            _ => None,
         }
-        if input.flags & flags::MOTOR_ARMED != 0 {
-            return Some(self.blocked(Refusal::MotorArmed));
-        }
-        if !input.ai_healthy {
-            return Some(self.trip(Refusal::AiUnhealthy));
-        }
-        if input.flags & flags::FAULT != 0 {
-            return Some(self.trip(Refusal::Fault));
-        }
-        None
     }
 
     /// Command plausibility and rate limiting, after every safety gate passed.
