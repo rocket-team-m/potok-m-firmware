@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+
 ![Поток-М: Прошивка](docs/banner.svg)
 
 # Поток-М / прошивка
@@ -154,9 +156,23 @@ probe-rs run --chip STM32H743ZI \
 (FLASH 2048K @ `0x08000000`, RAM 128K @ `0x20000000`) и такт time-driver'а
 (`TIM2`) должны быть сверены с BOM **до** первого включения.
 
-CI (`ci.yml`) — две независимые джобы на `ubuntu-latest`, обе обязательны:
-`host` — `fmt`, `clippy -D warnings`, `cargo test --workspace`;
-`thumb` — `cargo check --target thumbv7em-none-eabihf`.
+CI — два обязательных workflow на `ubuntu-latest`, оба с toolchain
+`dtolnay/rust-toolchain@stable`:
+
+- [`ci.yml`](.github/workflows/ci.yml): `host` — `fmt`, `clippy -D warnings`,
+  `cargo test --workspace`; `thumb` — `cargo check --target thumbv7em-none-eabihf`.
+- [`sil.yml`](.github/workflows/sil.yml): `sil` — полный хостовый прогон, два
+  фокусных ре-рана (wire-фолты и тайминг/watchdog) и `thumb no_std check`.
+
+Тот же SIL-прогон локально перед платой — четыре команды из
+[`docs/SIL.md`](docs/SIL.md):
+
+```sh
+cargo test --workspace
+cargo test --test safety --test watchguard_tests --test protocol_link_tests
+cargo test --test perf_tests --test scheduler_tests --test watchdog_tests --test timing_budget_tests
+cargo check --target thumbv7em-none-eabihf
+```
 
 UART: 2 Мбит/с, 8N1, DMA в обе стороны, путь к Raspberry Pi; RX — два
 статических слота с переключением, пока контроллер проверяет один, DMA набивает
@@ -166,8 +182,39 @@ UART: 2 Мбит/с, 8N1, DMA в обе стороны, путь к Raspberry Pi
 
 ## <span style="color:#a78bfa">06</span> / Тесты безопасности
 
-Ровно десять хостовых гейтов в [`firmware/tests/safety.rs`](firmware/tests/safety.rs).
-Все гоняются на `MockBoard`, без платы.
+**216 хостовых гейтов в 22 интеграционных бинарниках** (`firmware/tests/`) —
+результат `cargo test --workspace` на момент этого коммита. Все гоняются на
+`MockBoard`, без платы, без Embassy и без аллокатора. Десять канонических
+гейтов безопасности живут в [`firmware/tests/safety.rs`](firmware/tests/safety.rs)
+(таблица ниже); остальные расширяют тот же шов на прочие модули:
+
+| Группа | Тестов | Что покрывает |
+|---|---:|---|
+| Безопасность — `safety.rs` | 10 | Таблица ниже: CRC, seq, BURN и `MOTOR_ARMED`, три промаха, watchdog, assembler, FSM. |
+| SIL — `sil_tests.rs` | 12 | Детерминированные скрипты 500 Гц через [`sil.rs`](firmware/src/sil.rs): трасса, интерлок в пути привода, отказы link'а. |
+| Wire и логи — `protocol_link`, `watchguard`, `fault_inject`, `replay`, `telemetry_log` | 42 | Повторная подача кадра, фолт-инъекция, seq wrap, журнал и replay. |
+| Фаза и управление — `phase_fsm`, `control_pid`, `attitude`, `interlocks` | 38 | Автомат, PID, фиксированная точка/Q15, независимый гейт. |
+| Последователи и борт — `deployment`, `separation`, `sensor_voting`, `search_beacon`, `buzzer`, `self_test`, `calibration_table` | 80 | Разделение ступеней, голосование датчиков, маяк, self-test, калибровка. |
+| Тайминг — `perf`, `scheduler`, `watchdog`, `timing_budget` | 34 | Бюджет цикла 24 000 тактов, сетка 500 Гц, край срабатывания watchdog. |
+
+### SIL
+
+SIL (software-in-the-loop) — отдельный хостовый прогон:
+[`firmware/src/sil.rs`](firmware/src/sil.rs) — движок,
+[`firmware/tests/sil_tests.rs`](firmware/tests/sil_tests.rs) — 12 гейтов.
+Скрипт из `Tick`'ов гонит настоящие `step()`, `PhaseFsm`, `LinkState` и
+`Interlocks` через `MockBoard` в синтетическом времени (тик *n* = *n* × 2 мс).
+Интерлок стоит внутри пути привода: команда контроллера не доходит до борта,
+пока не пройдёт независимый гейт. Трасса фиксированной ёмкости, переполнение —
+`panic`, а не тихая потеря записи; одинаковый скрипт даёт одинаковую трассу.
+Прогон запускается workflow'ом [`sil.yml`](.github/workflows/sil.yml),
+границы описаны в [`docs/SIL.md`](docs/SIL.md).
+
+SIL — фильтр регрессий, **не** лётная квалификация. Он ничего не доказывает
+про пины, электрические сигналы, реальное время и плату. Зелёный `sil` необходим
+перед работой с платой, но недостаточен, чтобы назвать прошивку лётной.
+
+### Десять канонических гейтов безопасности
 
 | # | Тест | Что ловит |
 |---|---|---|
@@ -203,6 +250,11 @@ UART: 2 Мбит/с, 8N1, DMA в обе стороны, путь к Raspberry Pi
   fault injection по магии/CRC/версии/seq, BURN-гейт с подключёнными серво,
   отключение UART и убийство Pi с проверкой watchdog reset, cold flash,
   brownout, запас RAM/flash. Симулятор их не заменяет.
+
+Граница между хостовыми гейтами и платой — в [`docs/SIL.md`](docs/SIL.md);
+процедура и пустые ячейки bench-записей — в
+[`docs/HIL_CHECKLIST.md`](docs/HIL_CHECKLIST.md). Ни один из этих документов не
+является отчётом о прогоне на плате.
 
 ---
 
