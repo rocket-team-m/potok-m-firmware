@@ -10,14 +10,22 @@
 //! `control.rs`. Nothing here grants actuation authority — callers still run
 //! `LinkState::command` gates before applying the result.
 //!
-//! Two kinds of "cycles" appear:
-//! - [`CycleEstimate`] is a deterministic instruction-count model used by the
-//!   host tests and by `benches/loop_bench.rs`. It is host-reproducible, which
-//!   wall-clock timing is not, and it is what the budget assertion checks.
+//! Three kinds of "cycles" appear:
+//! - [`CycleEstimate`] is the legacy SIL *reservation* model. Its `quantize`
+//!   term reserves work no shipped function performs; it is kept only because
+//!   `timing_budget.rs` (a different file, outside this module's callers) pins
+//!   those numbers. It is not a measure of `control::step`.
+//! - [`StepCycles`] is the authoritative model of the shipped `control::step`
+//!   call graph. Its inputs are [`StepCounts`] measured by actually running the
+//!   production tick; it has no quantize term and charges only calls that exist
+//!   in `control.rs`, `interlocks.rs` and `watchdog.rs`. This is what the
+//!   benchmark reports.
 //! - [`read_cycles`] reads the Cortex-M7 DWT cycle counter on target, so the
-//!   model can be checked against hardware once the pins are wired.
+//!   model can be checked against hardware once the pins are wired. No target
+//!   measurement is claimed here: every constant below is a source-derived
+//!   upper bound, reproduced identically on the host.
 
-use potok_protocol::{flags, Phase};
+use potok_protocol::{flags, Phase, REPLY_SIZE, REQUEST_SIZE};
 
 use crate::{Command, MAX_CORRECTION_RAW};
 
@@ -41,6 +49,18 @@ const QUANT_FIELD_CYCLES: u32 = 12;
 const GATE_CYCLES: u32 = 12;
 const FIXED_AXIS_CYCLES: u32 = 4;
 const FRAME_OVERHEAD_CYCLES: u32 = 200;
+/// `Interlocks::evaluate_shield` in one tick: the five-way phase decode, four
+/// flag/health checks, the three Mach/pitot comparisons, plus plausibility and
+/// rate limiting on two axes. A conservative source-derived upper bound, not a
+/// hardware measurement.
+pub const SHIELD_CYCLES: u32 = 32;
+/// Watchdog policy per tick: `WatchdogPolicy::on_control_cycle` (deadman cadence
+/// check) and `watchdog::may_feed`.
+pub const WATCHDOG_CYCLES: u32 = 8;
+/// CRC-covered bytes of one request frame: the two magic bytes are not CRC'd.
+pub const REQUEST_CRC_BYTES: u32 = REQUEST_SIZE as u32 - 2;
+/// CRC-covered bytes of one reply frame: the two magic bytes are not CRC'd.
+pub const REPLY_CRC_BYTES: u32 = REPLY_SIZE as u32 - 2;
 
 /// Precomputed AI gate, indexed directly by the wire phase byte. A 256-entry
 /// table costs 256 bytes of flash and removes a bounds branch from the hot
@@ -131,6 +151,8 @@ pub fn scale_command(pitch: i16, yaw: i16, gain: Q15) -> Command {
 pub struct CycleEstimate {
     pub rx_scan: u32,
     pub crc: u32,
+    /// Legacy SIL reservation for 11 "scaled fields". No shipped function
+    /// calls a quantizer; the authoritative [`StepCycles`] model omits it.
     pub quantize: u32,
     pub gate: u32,
     pub fixed_math: u32,
@@ -161,6 +183,78 @@ impl CycleEstimate {
     }
 
     /// Panics with the offending number when the hot path outgrows its budget.
+    pub fn assert_budget(self, label: &str) {
+        let cycles = self.cycles();
+        assert!(
+            cycles <= CYCLE_BUDGET,
+            "cycle budget exceeded: {label} = {cycles} > {CYCLE_BUDGET}"
+        );
+    }
+}
+
+/// Call counts of the operations the shipped `control::step` actually runs in
+/// one tick. Every field is obtained by running the real tick and observing the
+/// board boundary -- never by assuming a function that production does not
+/// call. Costs are the conservative constants above, not hardware timings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StepCounts {
+    /// Bytes pushed into `ReplyAssembler::push` (`REPLY_SIZE` per delivered
+    /// frame; zero on an idle tick).
+    pub rx_bytes: u32,
+    /// CRC bytes: [`REQUEST_CRC_BYTES`] for the request every tick, plus
+    /// [`REPLY_CRC_BYTES`] for each decoded reply.
+    pub crc_bytes: u32,
+    /// `PhaseFsm::ai_allowed` passes, one per link-accepted reply.
+    pub phase_gate_calls: u32,
+    /// `Interlocks::evaluate_shield` calls, one per tick.
+    pub shield_calls: u32,
+    /// Watchdog policy calls, one per tick.
+    pub watchdog_calls: u32,
+    /// Axes clamped by `Command::clamped`, two per link-accepted reply.
+    pub clamped_axes: u32,
+}
+
+/// Deterministic cycle estimate for one shipped `control::step` tick.
+///
+/// Unlike [`CycleEstimate`], this model has no quantize item: `step()` calls no
+/// quantizer, so charging one would report a different program. Each line maps
+/// to a call in the shipped path; the sum is a source-derived upper bound, not
+/// a DWT reading.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StepCycles {
+    pub rx_scan: u32,
+    pub crc: u32,
+    pub phase_gate: u32,
+    pub shield: u32,
+    pub watchdog: u32,
+    pub command_clamp: u32,
+    pub overhead: u32,
+}
+
+impl StepCycles {
+    pub const fn new(c: StepCounts) -> Self {
+        Self {
+            rx_scan: c.rx_bytes * RX_BYTE_CYCLES,
+            crc: c.crc_bytes * CRC_BYTE_CYCLES,
+            phase_gate: c.phase_gate_calls * GATE_CYCLES,
+            shield: c.shield_calls * SHIELD_CYCLES,
+            watchdog: c.watchdog_calls * WATCHDOG_CYCLES,
+            command_clamp: c.clamped_axes * FIXED_AXIS_CYCLES,
+            overhead: FRAME_OVERHEAD_CYCLES,
+        }
+    }
+
+    pub const fn cycles(self) -> u32 {
+        self.rx_scan
+            + self.crc
+            + self.phase_gate
+            + self.shield
+            + self.watchdog
+            + self.command_clamp
+            + self.overhead
+    }
+
+    /// Panics with the offending number when the shipped tick outgrows budget.
     pub fn assert_budget(self, label: &str) {
         let cycles = self.cycles();
         assert!(

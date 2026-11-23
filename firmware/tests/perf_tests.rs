@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Host gates for the control-loop fast paths and the cycle model.
+//! Host gates for the control-loop fast paths and both cycle models.
 //!
 //! `lib.rs` is owned by another lane; the module is included by path so the
 //! exact firmware source is exercised. The re-exports make `crate::Command`
 //! and `crate::MAX_CORRECTION_RAW` inside it resolve to the real types.
+//! The production model is driven by actually calling `control::step` with a
+//! mock board; the legacy SIL reservation model is kept pinned because
+//! `timing_budget.rs` (outside this task's file scope) consumes it.
 
 pub use potok_m_firmware::{Command, MAX_CORRECTION_RAW};
 
@@ -11,10 +14,15 @@ pub use potok_m_firmware::{Command, MAX_CORRECTION_RAW};
 mod perf;
 
 use perf::{
-    ai_gate, clamp_raw, scale_command, CycleEstimate, AI_ALLOWED_BY_PHASE, CORE_HZ, CYCLE_BUDGET,
-    CYCLE_BUDGET_US, Q15, TICK_PERIOD_US,
+    ai_gate, clamp_raw, scale_command, CycleEstimate, StepCounts, StepCycles, AI_ALLOWED_BY_PHASE,
+    CORE_HZ, CYCLE_BUDGET, CYCLE_BUDGET_US, Q15, REPLY_CRC_BYTES, REQUEST_CRC_BYTES, SHIELD_CYCLES,
+    TICK_PERIOD_US, WATCHDOG_CYCLES,
 };
 use potok_m_firmware::phase::{PhaseEvent, PhaseFsm};
+use potok_m_firmware::{
+    control::step, interlocks::Interlocks, mock::MockBoard, watchdog::WatchdogPolicy, LinkState,
+    StepResult,
+};
 use potok_protocol::{flags, Phase, REPLY_SIZE, REQUEST_SIZE};
 
 /// Number of scaled fields in a compat request: 3 gyro, 3 accel, 3 mag,
@@ -151,6 +159,9 @@ fn q15_refuses_oversized_gain() {
     let _ = Q15::from_ratio(4, 1);
 }
 
+/// Pins the legacy SIL reservation model, still consumed by `timing_budget.rs`.
+/// Its 132-cycle `quantize` term is a phantom: no shipped function quantizes.
+/// The authoritative shipped-path model is pinned below.
 #[test]
 fn cycle_model_is_pinned_and_inside_the_budget() {
     assert_eq!(TICK_PERIOD_US, 2_000);
@@ -192,4 +203,122 @@ fn cycle_model_is_pinned_and_inside_the_budget() {
 #[should_panic(expected = "cycle budget exceeded: flood")]
 fn cycle_budget_panics_on_overrun() {
     CycleEstimate::new(10_000 * REPLY_SIZE as u32, 0, 0, 0, false).assert_budget("flood");
+}
+
+fn healthy_reply(seq: u16) -> potok_protocol::ReplyFrame {
+    potok_protocol::ReplyFrame {
+        seq,
+        g_pitch: 50,
+        g_yaw: -50,
+        confidence: 200,
+        ai_healthy: 1,
+        version: 1,
+    }
+}
+
+/// One real production tick; `COAST` keeps the accepted path from being vetoed
+/// by the initial `BURN` phase, and fresh state keeps counts steady.
+fn step_once(frame: Option<potok_protocol::ReplyFrame>) -> (StepResult, MockBoard) {
+    let mut board = MockBoard::new();
+    board.sensor_flags = flags::IMU_OK;
+    let mut fsm = PhaseFsm::new();
+    fsm.apply(PhaseEvent::Burnout).unwrap();
+    let mut link = LinkState::new();
+    let mut interlock = Interlocks::default();
+    let mut policy = WatchdogPolicy::new();
+    if let Some(reply) = frame {
+        board.queue_reply(&reply);
+    }
+    let result = step(
+        &mut board,
+        &mut fsm,
+        &mut link,
+        &mut interlock,
+        &mut policy,
+        true,
+    );
+    (result, board)
+}
+
+#[test]
+fn production_step_model_has_no_quantize_item() {
+    let counts = StepCounts {
+        rx_bytes: REPLY_SIZE as u32,
+        crc_bytes: REQUEST_CRC_BYTES + REPLY_CRC_BYTES,
+        phase_gate_calls: 1,
+        shield_calls: 1,
+        watchdog_calls: 1,
+        clamped_axes: 2,
+    };
+    let est = StepCycles::new(counts);
+    assert_eq!(est.rx_scan, 14 * 6);
+    assert_eq!(est.crc, 66 * 4);
+    assert_eq!(est.phase_gate, 12);
+    assert_eq!(est.shield, SHIELD_CYCLES);
+    assert_eq!(est.watchdog, WATCHDOG_CYCLES);
+    assert_eq!(est.command_clamp, 8);
+    assert_eq!(est.overhead, 200);
+    assert_eq!(est.cycles(), 608);
+    est.assert_budget("accepted");
+}
+
+#[test]
+fn shipped_step_counts_drive_the_production_model() {
+    let (result, board) = step_once(None);
+    assert_eq!(result, StepResult::Idle);
+    assert_eq!(board.rx().swaps, 0);
+    assert_eq!(board.sent_frames().len(), 1);
+    assert_eq!(board.applied.len(), 1);
+    assert_eq!(board.pets(), 1);
+    let idle = StepCounts {
+        rx_bytes: REPLY_SIZE as u32 * board.rx().swaps as u32,
+        crc_bytes: REQUEST_CRC_BYTES,
+        phase_gate_calls: 0,
+        shield_calls: 1,
+        watchdog_calls: 1,
+        clamped_axes: 0,
+    };
+    assert_eq!(StepCycles::new(idle).cycles(), 456);
+
+    let (result, board) = step_once(Some(healthy_reply(1)));
+    assert_eq!(result, StepResult::FrameRejected);
+    assert_eq!(board.rx().swaps, 1);
+    assert_eq!(board.sent_frames().len(), 1);
+    assert_eq!(board.applied.len(), 1);
+    assert_eq!(board.pets(), 1);
+    let rejected = StepCounts {
+        rx_bytes: REPLY_SIZE as u32,
+        crc_bytes: REQUEST_CRC_BYTES + REPLY_CRC_BYTES,
+        phase_gate_calls: 0,
+        shield_calls: 1,
+        watchdog_calls: 1,
+        clamped_axes: 0,
+    };
+    assert_eq!(StepCycles::new(rejected).cycles(), 588);
+
+    let (result, board) = step_once(Some(healthy_reply(0)));
+    assert!(matches!(result, StepResult::Accepted(_)));
+    assert_eq!(board.rx().swaps, 1);
+    assert_eq!(board.sent_frames().len(), 1);
+    assert_eq!(board.applied.len(), 1);
+    assert_eq!(board.pets(), 1);
+    let accepted = StepCounts {
+        rx_bytes: REPLY_SIZE as u32,
+        crc_bytes: REQUEST_CRC_BYTES + REPLY_CRC_BYTES,
+        phase_gate_calls: 1,
+        shield_calls: 1,
+        watchdog_calls: 1,
+        clamped_axes: 2,
+    };
+    assert_eq!(StepCycles::new(accepted).cycles(), 608);
+}
+
+#[test]
+#[should_panic(expected = "cycle budget exceeded: flood")]
+fn production_budget_panics_on_overrun() {
+    StepCycles::new(StepCounts {
+        rx_bytes: 10_000 * REPLY_SIZE as u32,
+        ..StepCounts::default()
+    })
+    .assert_budget("flood");
 }
