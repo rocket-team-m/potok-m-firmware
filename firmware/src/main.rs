@@ -27,7 +27,7 @@ mod hw {
         phase::PhaseEvent,
         uart::{DoubleBufferRx, FrameTx, UartError},
         watchdog::Iwdg,
-        Command,
+        Capability, CapabilityLedger, Command, FlightBoard, Unavailable,
     };
 
     /// TODO(schematic): DMA idle-line receive into two static slots. The
@@ -58,6 +58,16 @@ mod hw {
         rx: Rx<'d>,
         tx: Tx<'d>,
         wd: Iwdg<'d>,
+        /// Every stub below records why it could not run. No driver is claimed
+        /// in this adapter, so each call is a counted `Unavailable`, never a
+        /// silent discard or a faked success.
+        capabilities: CapabilityLedger,
+    }
+
+    impl HwBoard<'static> {
+        pub fn capabilities(&self) -> &CapabilityLedger {
+            &self.capabilities
+        }
     }
 
     pub fn build_board(wd: Iwdg<'static>) -> HwBoard<'static> {
@@ -91,20 +101,33 @@ mod hw {
             0
         }
         fn motor_armed(&self) -> bool {
-            // TODO(schematic): read the motor-armed sense input.
+            // TODO(schematic): read the motor-armed sense input. Absence is
+            // counted; `false` is the safe direction, not a claim of disarm.
+            self.capabilities
+                .note_unavailable(Capability::MotorArmedSense, Unavailable::NoDriver);
             false
         }
         fn poll_phase_event(&mut self) -> Option<PhaseEvent> {
             // TODO(schematic): derive Burnout/Apogee/Descent/Touchdown from the
             // sensor drivers. Until wired, the FSM stays in BURN and AI is off.
+            self.capabilities
+                .note_unavailable(Capability::PhaseSense, Unavailable::NoDriver);
             None
         }
         fn apply_command(&mut self, cmd: Command) {
             // TODO(schematic): servo PWM pins. No actuation until the pin map
-            // and the BURN gate have been validated on the bench.
+            // and the BURN gate have been validated on the bench. The discard
+            // is counted, so a command that never reaches a fin is visible.
+            self.capabilities
+                .note_unavailable(Capability::Actuation, Unavailable::NoDriver);
             let _ = cmd;
         }
     }
+
+    /// All typed capabilities are absent until a schematic-bound driver opts
+    /// in. `FlightPath::tick` counts each one with a reason instead of
+    /// pretending the module ran.
+    impl FlightBoard for HwBoard<'static> {}
 
     impl Airdata for HwBoard<'static> {
         fn pitot_dp_pa(&self) -> Option<f32> {
@@ -131,12 +154,13 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 async fn main(_spawner: embassy_executor::Spawner) {
     use embassy_time::{Duration, Ticker};
     use potok_m_firmware::{
+        board::Board,
         interlocks::Interlocks,
         scheduler::TICK_HZ,
         step,
         telemetry_log::{Cadence, Emission, LogGate},
-        watchdog::{setup_iwdg, WatchdogPolicy},
-        LinkState, PhaseFsm, StepResult,
+        watchdog::{setup_iwdg, WatchdogPolicy, CONTROL_PERIOD_US},
+        Capability, FlightPath, LinkState, PhaseFsm, StepResult,
     };
 
     use crate::shield_sample::ShieldSampler;
@@ -172,6 +196,9 @@ async fn main(_spawner: embassy_executor::Spawner) {
     let mut interlock = Interlocks::default();
     let mut policy = WatchdogPolicy::new();
     let mut sampler = ShieldSampler::new();
+    // The pure modules run behind typed capability gates. No driver is wired
+    // on HwBoard, so every tick records counted Unavailable reasons here.
+    let mut flight = FlightPath::new();
     let mut ticker = Ticker::every(Duration::from_millis(2)); // 500 Hz
 
     // One gate per message: each owns its own dedupe, cadence and suppression
@@ -187,10 +214,16 @@ async fn main(_spawner: embassy_executor::Spawner) {
     let mut ai_off_log = LogGate::<bool>::new(Cadence::on_change());
     let mut interlock_off_log = LogGate::<bool>::new(Cadence::on_change());
     let mut deadman_log = LogGate::<bool>::new(Cadence::on_change());
+    let mut flight_cap_log = LogGate::<()>::new(Cadence::periodic(TICK_HZ));
 
     loop {
         ticker.next().await;
         link.set_shield_sample(sampler.sample(&board));
+        // One bounded pass over the flight-path modules, before the safety
+        // step. This does not touch `apply_command`: `step()` stays the only
+        // gate in front of the actuator.
+        let now_us = board.now_us();
+        flight.tick(&mut board, fsm.phase(), now_us, CONTROL_PERIOD_US);
         match step(
             &mut board,
             &mut fsm,
@@ -252,6 +285,26 @@ async fn main(_spawner: embassy_executor::Spawner) {
         }
         if latch_entered(&mut deadman_log, policy.deadman().tripped()) {
             defmt::warn!("control deadline monitor tripped; watchdog feed withheld");
+        }
+        // Capability debt is a first-class reading: which modules did not run
+        // and why. One summary per second, counted by the gate in between.
+        if flight_cap_log.observe(()).should_emit() {
+            let modules = flight.ledger();
+            let board_caps = board.capabilities();
+            defmt::info!(
+                "flight capability (voting={} mahony={} pid={} deploy={} sep={} selftest={} radio={} act={} phase={} motor={} suppressed={})",
+                modules.unavailable(Capability::SensorVoting),
+                modules.unavailable(Capability::Mahony),
+                modules.unavailable(Capability::Pid),
+                modules.unavailable(Capability::Deployment),
+                modules.unavailable(Capability::Separation),
+                modules.unavailable(Capability::SelfTest),
+                modules.unavailable(Capability::Radio),
+                board_caps.unavailable(Capability::Actuation),
+                board_caps.unavailable(Capability::PhaseSense),
+                board_caps.unavailable(Capability::MotorArmedSense),
+                flight_cap_log.suppressed()
+            );
         }
     }
 }
