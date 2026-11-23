@@ -132,7 +132,9 @@ async fn main(_spawner: embassy_executor::Spawner) {
     use embassy_time::{Duration, Ticker};
     use potok_m_firmware::{
         interlocks::Interlocks,
+        scheduler::TICK_HZ,
         step,
+        telemetry_log::{Cadence, Emission, LogGate},
         watchdog::{setup_iwdg, WatchdogPolicy},
         LinkState, PhaseFsm, StepResult,
     };
@@ -140,6 +142,27 @@ async fn main(_spawner: embassy_executor::Spawner) {
     use crate::shield_sample::ShieldSampler;
 
     use defmt_rtt as _;
+
+    /// Explicit debug opt-in for every-tick airdata logging. Off in flight:
+    /// `Cadence::debug_every_tick()` is the only path to a 500 Hz log and this
+    /// flag is the only switch that selects it.
+    const DEBUG_EVERY_TICK: bool = false;
+
+    /// Qualitative airdata state used as the gate key: which of the six
+    /// reasons are active, never their growing tallies. A tally changes every
+    /// tick with no pitot driver and would make every tick a state change.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct AirdataState {
+        shield: u8,
+        airdata: u8,
+    }
+
+    /// A latch warning is immediate on entry into the latched state; the
+    /// steady latched ticks are suppressed and counted by the gate.
+    fn latch_entered(gate: &mut LogGate<bool>, latched: bool) -> bool {
+        latched && matches!(gate.observe_error(latched), Emission::Safety)
+    }
+
     let p = embassy_stm32::init(Default::default());
     let wd = setup_iwdg(p.IWDG1);
     let mut board = hw::build_board(wd);
@@ -150,6 +173,20 @@ async fn main(_spawner: embassy_executor::Spawner) {
     let mut policy = WatchdogPolicy::new();
     let mut sampler = ShieldSampler::new();
     let mut ticker = Ticker::every(Duration::from_millis(2)); // 500 Hz
+
+    // One gate per message: each owns its own dedupe, cadence and suppression
+    // count. A cyclic cadence of TICK_HZ is one summary per second.
+    let airdata_cadence = if DEBUG_EVERY_TICK {
+        Cadence::debug_every_tick()
+    } else {
+        Cadence::periodic(TICK_HZ)
+    };
+    let mut airdata_log = LogGate::<AirdataState>::new(airdata_cadence);
+    let mut reject_log = LogGate::<()>::new(Cadence::periodic(TICK_HZ));
+    let mut applied_log = LogGate::<()>::new(Cadence::periodic(TICK_HZ));
+    let mut ai_off_log = LogGate::<bool>::new(Cadence::on_change());
+    let mut interlock_off_log = LogGate::<bool>::new(Cadence::on_change());
+    let mut deadman_log = LogGate::<bool>::new(Cadence::on_change());
 
     loop {
         ticker.next().await;
@@ -162,29 +199,58 @@ async fn main(_spawner: embassy_executor::Spawner) {
             &mut policy,
             true,
         ) {
-            StepResult::FrameRejected => defmt::warn!("reply frame rejected"),
+            StepResult::FrameRejected => {
+                if reject_log.observe(()).should_emit() {
+                    defmt::warn!(
+                        "reply frame rejected (total={} suppressed={})",
+                        link.counters.rejected,
+                        reject_log.suppressed()
+                    );
+                }
+            }
             StepResult::Accepted(cmd) if cmd.is_zero() => {
                 let u = sampler.unavailable_counts();
-                defmt::info!(
-                    "zero command (shield: mach={} pitot={} nonfinite={} airdata: nodrv={} nonfin={} nonpos={})",
-                    link.shield_reasons.mach_limit,
-                    link.shield_reasons.pitot_invalid,
-                    link.shield_reasons.non_finite_mach,
-                    u.no_driver,
-                    u.non_finite,
-                    u.non_positive
-                );
+                let bit = |count: u32| (count > 0) as u8;
+                let key = AirdataState {
+                    shield: bit(link.shield_reasons.mach_limit)
+                        | (bit(link.shield_reasons.pitot_invalid) << 1)
+                        | (bit(link.shield_reasons.non_finite_mach) << 2),
+                    airdata: bit(u.no_driver)
+                        | (bit(u.non_finite) << 1)
+                        | (bit(u.non_positive) << 2),
+                };
+                if airdata_log.observe(key).should_emit() {
+                    defmt::info!(
+                        "zero command (shield: mach={} pitot={} nonfinite={} airdata: nodrv={} nonfin={} nonpos={} suppressed={})",
+                        link.shield_reasons.mach_limit,
+                        link.shield_reasons.pitot_invalid,
+                        link.shield_reasons.non_finite_mach,
+                        u.no_driver,
+                        u.non_finite,
+                        u.non_positive,
+                        airdata_log.suppressed()
+                    );
+                }
             }
-            StepResult::Accepted(_) => defmt::info!("AI command applied"),
+            StepResult::Accepted(_) => {
+                if applied_log.observe(()).should_emit() {
+                    defmt::info!(
+                        "AI command applied (suppressed={})",
+                        applied_log.suppressed()
+                    );
+                }
+            }
             StepResult::Idle => {}
         }
-        if link.is_disabled() || policy.ai_latched() {
+        // Safety latches stay immediate on entry; the steady latched ticks
+        // are suppressed and counted instead of streamed at 500 Hz.
+        if latch_entered(&mut ai_off_log, link.is_disabled() || policy.ai_latched()) {
             defmt::warn!("AI latched off; explicit reset required");
         }
-        if interlock.latched().is_some() {
+        if latch_entered(&mut interlock_off_log, interlock.latched().is_some()) {
             defmt::warn!("independent interlock latched; explicit reset required");
         }
-        if policy.deadman().tripped() {
+        if latch_entered(&mut deadman_log, policy.deadman().tripped()) {
             defmt::warn!("control deadline monitor tripped; watchdog feed withheld");
         }
     }

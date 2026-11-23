@@ -375,3 +375,160 @@ impl<'a, const SZ: usize> Iterator for Replay<'a, SZ> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Typed log cadence policy
+// ---------------------------------------------------------------------------
+//
+// The shipping loop runs at 500 Hz. An unconditional `defmt::info!` there has
+// no term in the `perf` cycle model and dominates the unmodelled cost. This
+// policy makes the emission rate a declared, host-testable decision: a gate
+// emits on a typed state change, on a new safety reason, or at a declared slow
+// cadence, and counts every observation it suppresses. Every-tick logging is
+// reachable only through the explicitly named debug cadence.
+
+/// Why an observation was allowed to reach the logging sink.
+///
+/// Returned by [`LogGate::observe`] so the caller can keep `defmt!` out of the
+/// hot path while the decision itself stays host-testable without a logger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Emission {
+    /// A new safety-relevant reason appeared: emit immediately, never deferred
+    /// to a cadence window.
+    Safety,
+    /// The typed state key changed: emit immediately.
+    Change,
+    /// The declared slow cadence elapsed: emit a periodic summary.
+    Cadence,
+    /// Explicit debug-every-tick mode: emit (a production gate never selects
+    /// this cadence).
+    Debug,
+    /// Nothing eligible: the observation was counted and suppressed.
+    Suppressed,
+}
+
+impl Emission {
+    /// True unless this observation was suppressed.
+    pub const fn should_emit(self) -> bool {
+        !matches!(self, Self::Suppressed)
+    }
+}
+
+/// Declared emission rate for non-safety records.
+///
+/// A period of one (every tick) is deliberately not constructible through
+/// [`Cadence::periodic`]; the only route to it is [`Cadence::debug_every_tick`],
+/// so 500 Hz logging is always a visible, typed choice in review.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cadence {
+    /// Ticks between periodic emissions: 0 = state-change only, 1 = debug
+    /// every tick, >= 2 = periodic summary.
+    period_ticks: u32,
+}
+
+impl Cadence {
+    /// Emit only when the observed state key changes (or a safety reason is
+    /// observed). No periodic emission.
+    pub const fn on_change() -> Self {
+        Self { period_ticks: 0 }
+    }
+
+    /// Emit a periodic summary at most once every `period_ticks` observations.
+    /// A period of one would be every-tick logging and is refused loudly.
+    pub const fn periodic(period_ticks: u32) -> Self {
+        assert!(
+            period_ticks >= 2,
+            "periodic cadence must be >= 2 ticks; use debug_every_tick() for 1"
+        );
+        Self { period_ticks }
+    }
+
+    /// Explicit debug opt-in: emit on every observation. The shipping loop
+    /// never selects this unless its debug flag is turned on by a human.
+    pub const fn debug_every_tick() -> Self {
+        Self { period_ticks: 1 }
+    }
+
+    /// True only for the explicit every-tick debug cadence.
+    pub const fn is_every_tick(self) -> bool {
+        self.period_ticks == 1
+    }
+}
+
+/// Stateful cadence gate over a typed, `Copy + PartialEq` state key.
+///
+/// `Key` must be the *qualitative* state — which reasons are active, which
+/// latch is set — never a monotonic counter. A growing tally changes on every
+/// tick and would turn every tick into a state change, reproducing the 500 Hz
+/// log this gate exists to remove. Cumulative counts belong in the emitted
+/// payload; the active-reason bits belong in the key.
+#[derive(Clone, Copy, Debug)]
+pub struct LogGate<Key: Copy + PartialEq> {
+    cadence: Cadence,
+    last: Option<Key>,
+    since_emit: u32,
+    suppressed: u64,
+    emitted: u64,
+}
+
+impl<Key: Copy + PartialEq> LogGate<Key> {
+    pub const fn new(cadence: Cadence) -> Self {
+        Self {
+            cadence,
+            last: None,
+            since_emit: 0,
+            suppressed: 0,
+            emitted: 0,
+        }
+    }
+
+    /// Decide whether this observation may be logged. Do not reach the
+    /// `defmt!` sink unless [`Emission::should_emit`] is true.
+    pub fn observe(&mut self, key: Key) -> Emission {
+        self.since_emit = self.since_emit.saturating_add(1);
+
+        let emission = if self.last != Some(key) {
+            Emission::Change
+        } else if self.cadence.is_every_tick() {
+            Emission::Debug
+        } else if self.cadence.period_ticks >= 2 && self.since_emit >= self.cadence.period_ticks {
+            Emission::Cadence
+        } else {
+            Emission::Suppressed
+        };
+
+        if emission.should_emit() {
+            self.last = Some(key);
+            self.since_emit = 0;
+            self.emitted += 1;
+        } else {
+            self.suppressed += 1;
+        }
+        emission
+    }
+
+    /// Observe a safety-relevant reason. A *new* reason emits immediately as
+    /// [`Emission::Safety`] (the state-change path, never deferred to a
+    /// cadence window); repeats dedupe and count exactly as [`Self::observe`].
+    pub fn observe_error(&mut self, key: Key) -> Emission {
+        match self.observe(key) {
+            Emission::Change => Emission::Safety,
+            other => other,
+        }
+    }
+
+    /// Observations not emitted, counted over the gate's lifetime.
+    pub const fn suppressed(&self) -> u64 {
+        self.suppressed
+    }
+
+    /// Observations the gate approved for emission over its lifetime.
+    pub const fn emitted(&self) -> u64 {
+        self.emitted
+    }
+
+    /// The cadence this gate was built with.
+    pub const fn cadence(&self) -> Cadence {
+        self.cadence
+    }
+}

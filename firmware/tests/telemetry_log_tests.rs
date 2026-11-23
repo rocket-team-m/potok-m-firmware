@@ -6,8 +6,8 @@
 mod telemetry_log;
 
 use telemetry_log::{
-    decode_record, encode_record, EncodeError, FlightLogger, Replay, ReplayError, HEADER_LEN,
-    LOG_MAGIC, MIN_RECORD_SIZE,
+    decode_record, encode_record, Cadence, Emission, EncodeError, FlightLogger, LogGate, Replay,
+    ReplayError, HEADER_LEN, LOG_MAGIC, MIN_RECORD_SIZE,
 };
 
 const SZ: usize = 20;
@@ -249,4 +249,140 @@ fn replay_accepts_u32_sequence_wrap() {
         .map(|record| record.unwrap().seq)
         .collect();
     assert_eq!(seqs, vec![u32::MAX - 1, u32::MAX, 0, 1]);
+}
+
+// ---------------------------------------------------------------------------
+// Typed cadence policy
+// ---------------------------------------------------------------------------
+
+#[test]
+fn on_change_emits_once_then_counts_every_repeat() {
+    let mut gate = LogGate::<u8>::new(Cadence::on_change());
+    assert_eq!(gate.observe(1), Emission::Change);
+    for _ in 0..5 {
+        assert_eq!(gate.observe(1), Emission::Suppressed);
+    }
+    assert_eq!(gate.emitted(), 1);
+    assert_eq!(gate.suppressed(), 5);
+    assert!(!gate.cadence().is_every_tick());
+
+    // A different key reopens emission; suppression keeps accumulating.
+    assert_eq!(gate.observe(2), Emission::Change);
+    assert_eq!(gate.observe(1), Emission::Change);
+    assert_eq!(gate.emitted(), 3);
+    assert_eq!(gate.suppressed(), 5);
+}
+
+#[test]
+fn periodic_cadence_bounds_the_rate_and_counts_the_rest() {
+    let mut gate = LogGate::<()>::new(Cadence::periodic(3));
+    let emissions: Vec<_> = (0..7).map(|_| gate.observe(())).collect();
+    assert_eq!(
+        emissions,
+        vec![
+            Emission::Change,
+            Emission::Suppressed,
+            Emission::Suppressed,
+            Emission::Cadence,
+            Emission::Suppressed,
+            Emission::Suppressed,
+            Emission::Cadence,
+        ]
+    );
+    assert_eq!(gate.emitted(), 3);
+    assert_eq!(gate.suppressed(), 4);
+}
+
+#[test]
+#[should_panic(expected = "periodic cadence must be >= 2")]
+fn periodic_cadence_refuses_a_one_tick_period() {
+    let _ = Cadence::periodic(1);
+}
+
+#[test]
+fn debug_cadence_is_the_only_every_tick_path() {
+    let debug = Cadence::debug_every_tick();
+    assert!(debug.is_every_tick());
+    let mut gate = LogGate::<()>::new(debug);
+    assert_eq!(gate.observe(()), Emission::Change);
+    for _ in 0..9 {
+        assert_eq!(gate.observe(()), Emission::Debug);
+    }
+    assert_eq!(gate.emitted(), 10);
+    assert_eq!(gate.suppressed(), 0);
+}
+
+#[test]
+fn error_reasons_are_immediate_and_repeats_are_suppressed() {
+    let mut gate = LogGate::<bool>::new(Cadence::on_change());
+    // Entering a latched state is immediate and never deferred to cadence.
+    assert_eq!(gate.observe_error(true), Emission::Safety);
+    // Steady latched ticks are counted, not streamed.
+    for _ in 0..50 {
+        assert_eq!(gate.observe_error(true), Emission::Suppressed);
+    }
+    // A clear is a change; re-latching is immediate again.
+    assert_eq!(gate.observe_error(false), Emission::Safety);
+    assert_eq!(gate.observe_error(true), Emission::Safety);
+    assert_eq!(gate.suppressed(), 50);
+}
+
+#[test]
+fn should_emit_is_true_only_for_real_emissions() {
+    for emission in [
+        Emission::Safety,
+        Emission::Change,
+        Emission::Cadence,
+        Emission::Debug,
+    ] {
+        assert!(emission.should_emit());
+    }
+    assert!(!Emission::Suppressed.should_emit());
+}
+
+#[test]
+fn monotonic_tallies_must_not_be_used_as_the_gate_key() {
+    // Regression for MCUF01 §4.2. The old log keyed on six growing counters,
+    // so the no-driver tick made every observation a "change" at 500 Hz.
+    // Keying on active-reason bits keeps the state stable while the tallies
+    // keep growing: only the first tick and the slow cadence emit.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct AirdataState {
+        no_driver_active: bool,
+        pitot_invalid_active: bool,
+    }
+
+    let mut gate = LogGate::<AirdataState>::new(Cadence::periodic(500));
+    let mut no_driver = 0u32;
+    let mut pitot_invalid = 0u32;
+    let mut emitted = 0;
+    for _ in 0..1_000 {
+        no_driver += 1;
+        pitot_invalid += 1;
+        let key = AirdataState {
+            no_driver_active: no_driver > 0,
+            pitot_invalid_active: pitot_invalid > 0,
+        };
+        if gate.observe(key).should_emit() {
+            emitted += 1;
+        }
+    }
+    // 1 Hz cadence: the first tick plus one 500-tick summary in 1 000 ticks.
+    assert_eq!(emitted, 2);
+    assert_eq!(gate.suppressed(), 998);
+    assert!(no_driver >= 1_000 && pitot_invalid >= 1_000);
+}
+
+#[test]
+fn gates_are_independent_and_counts_do_not_leak() {
+    let mut a = LogGate::<u8>::new(Cadence::on_change());
+    let mut b = LogGate::<u8>::new(Cadence::on_change());
+    assert_eq!(a.observe(1), Emission::Change);
+    assert_eq!(b.observe(2), Emission::Change);
+    assert_eq!(a.observe(1), Emission::Suppressed);
+    assert_eq!(b.observe(2), Emission::Suppressed);
+    assert_eq!(a.emitted(), 1);
+    assert_eq!(b.emitted(), 1);
+    assert_eq!(a.suppressed(), 1);
+    assert_eq!(b.suppressed(), 1);
 }
