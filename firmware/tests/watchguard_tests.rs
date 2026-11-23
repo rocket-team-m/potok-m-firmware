@@ -437,10 +437,8 @@ impl ShieldRig {
     }
 
     fn sample(&mut self, pitot_dp: i16, mach_est: f32) {
-        self.link.set_shield_sample(ShieldSample {
-            pitot_dp,
-            mach_est,
-        });
+        self.link
+            .set_shield_sample(ShieldSample { pitot_dp, mach_est });
     }
 
     fn drive_reply(&mut self, pitch: i16, yaw: i16) -> StepResult {
@@ -466,10 +464,7 @@ fn mach_limit_zeroes_the_command_before_the_board_and_counts_the_reason() {
     let mut rig = ShieldRig::coasting();
     rig.sample(1_000, 0.9); // default ceiling is 0.6
 
-    assert_eq!(
-        rig.drive_reply(8, -8),
-        StepResult::Accepted(Command::ZERO)
-    );
+    assert_eq!(rig.drive_reply(8, -8), StepResult::Accepted(Command::ZERO));
     assert_eq!(rig.applied(), Command::ZERO, "no command reached the board");
     assert_eq!(rig.interlock.counters.mach_blocked, 1);
     assert_eq!(rig.link.shield_reasons.mach_limit, 1);
@@ -503,7 +498,10 @@ fn a_non_finite_mach_latches_and_holds_zero_until_reset() {
     assert_eq!(rig.link.shield_reasons.non_finite_mach, 2);
 
     rig.interlock.reset();
-    assert_eq!(rig.drive_reply(8, -8), StepResult::Accepted(Command { pitch: 8, yaw: -8 }));
+    assert_eq!(
+        rig.drive_reply(8, -8),
+        StepResult::Accepted(Command { pitch: 8, yaw: -8 })
+    );
     assert_eq!(rig.applied(), Command { pitch: 8, yaw: -8 });
 }
 
@@ -515,11 +513,17 @@ fn an_unusable_pitot_zeroes_without_latching_and_recovers() {
     assert_eq!(rig.drive_reply(8, -8), StepResult::Accepted(Command::ZERO));
     assert_eq!(rig.applied(), Command::ZERO);
     assert_eq!(rig.link.shield_reasons.pitot_invalid, 1);
-    assert_eq!(rig.interlock.counters.mach_blocked, 0, "not a Mach-limit trip");
+    assert_eq!(
+        rig.interlock.counters.mach_blocked, 0,
+        "not a Mach-limit trip"
+    );
     assert_eq!(rig.interlock.latched(), None);
 
     rig.sample(1_000, 0.1);
-    assert_eq!(rig.drive_reply(8, -8), StepResult::Accepted(Command { pitch: 8, yaw: -8 }));
+    assert_eq!(
+        rig.drive_reply(8, -8),
+        StepResult::Accepted(Command { pitch: 8, yaw: -8 })
+    );
     assert_eq!(rig.applied(), Command { pitch: 8, yaw: -8 });
 }
 
@@ -536,7 +540,10 @@ fn the_sil_actuation_path_runs_the_same_mach_shield() {
 
     assert_eq!(trace.len(), 2);
     assert_eq!(trace.records()[0].applied, Command::ZERO);
-    assert_eq!(trace.records()[0].interlock_refusal, Some(Refusal::MachLimit));
+    assert_eq!(
+        trace.records()[0].interlock_refusal,
+        Some(Refusal::MachLimit)
+    );
     assert_eq!(trace.records()[1].applied, Command { pitch: 8, yaw: -8 });
     assert_eq!(sim.shield_reasons().mach_limit, 1);
     assert_eq!(sim.shield_reasons().accepted, 1);

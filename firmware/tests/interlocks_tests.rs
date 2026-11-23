@@ -283,7 +283,11 @@ fn mach_above_limit_zeroes_the_command_with_a_reason_and_no_latch() {
     assert_eq!(d.command, Interlocks::FAILSAFE);
     assert!(!d.permitted);
     assert_eq!(d.refusal, Some(Refusal::MachLimit));
-    assert_eq!(g.latched(), None, "Mach overspeed is transient, not a fault");
+    assert_eq!(
+        g.latched(),
+        None,
+        "Mach overspeed is transient, not a fault"
+    );
     assert_eq!(g.counters.mach_blocked, 1);
     assert_eq!(g.counters.accepted, 0);
     assert!(g.last_command().is_zero());
@@ -300,7 +304,10 @@ fn mach_above_limit_zeroes_the_command_with_a_reason_and_no_latch() {
 fn mach_exactly_at_the_limit_is_accepted() {
     let mut g = gate();
     let d = g.evaluate_shield(input(Phase::COAST, 100, 0, 0), PITOT_OK, 0.6);
-    assert!(d.permitted, "the gate is `>`, so 0.6 exactly is still legal");
+    assert!(
+        d.permitted,
+        "the gate is `>`, so 0.6 exactly is still legal"
+    );
     assert_eq!(d.refusal, None);
     assert_eq!(d.command, Command { pitch: 10, yaw: 0 });
     assert_eq!(g.counters.mach_blocked, 0);
@@ -401,12 +408,14 @@ fn configured_mach_limit_is_enforced() {
         ..Limits::DEFAULT
     });
     assert_eq!(
-        g.evaluate_shield(input(Phase::COAST, 50, 0, 0), PITOT_OK, 0.35).refusal,
+        g.evaluate_shield(input(Phase::COAST, 50, 0, 0), PITOT_OK, 0.35)
+            .refusal,
         Some(Refusal::MachLimit)
     );
-    assert!(g
-        .evaluate_shield(input(Phase::COAST, 50, 0, 1_000), PITOT_OK, 0.25)
-        .permitted);
+    assert!(
+        g.evaluate_shield(input(Phase::COAST, 50, 0, 1_000), PITOT_OK, 0.25)
+            .permitted
+    );
 }
 
 #[test]

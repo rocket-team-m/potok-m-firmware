@@ -60,10 +60,10 @@ impl Refusal {
         matches!(
             self,
             Self::UnknownPhase(_)
-            | Self::AiUnhealthy
-            | Self::Fault
-            | Self::Implausible
-            | Self::NonFiniteMach
+                | Self::AiUnhealthy
+                | Self::Fault
+                | Self::Implausible
+                | Self::NonFiniteMach
         )
     }
 }
