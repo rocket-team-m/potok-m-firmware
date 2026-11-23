@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Renode platform for the Potok-M smoke image.
+//
+// The built-in CPU platform is the authority for the STM32H743 register map;
+// this file only names it and records the two facts the smoke relies on. No
+// peripheral is invented, remapped or stubbed here.
+//
+//   cpu        : Cortex-M7 at 0x00000000 ITCM / 0x08000000 flash
+//   flashBank1 : 1 MiB at 0x08000000 (the smoke ELF is far smaller)
+//   dtcm       : 128 KiB at 0x20000000 (result marker at 0x2001F800)
+//   usart1     : 0x40011000, TX observed by the smoke script
+//   watchdog   : 0x58004800, STM32 independent watchdog
+//   rcc        : 0x58024400, STM32H7 reset/clock controller
+
+using "platforms/cpus/stm32h743.repl"

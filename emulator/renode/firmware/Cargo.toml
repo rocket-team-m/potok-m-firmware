@@ -1,0 +1,30 @@
+[workspace]
+
+[package]
+name = "potok-renode-smoke"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "potok-renode-smoke"
+path = "src/main.rs"
+
+[features]
+default = ["emulator-board"]
+# The no-panic, typed-Unavailable board adapter used by the Renode smoke.
+# It is NOT a hardware board: no pin, UART or DMA is claimed by it.
+emulator-board = []
+
+[dependencies]
+potok-m-firmware = { path = "../../../firmware" }
+cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7"
+defmt = "1.0"
+defmt-rtt = "0.4"
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"

@@ -1,0 +1,37 @@
+:name: potok-renode-smoke
+:description: Deterministic Renode smoke for the Potok-M control core.
+
+# The ELF path is relative to this script. run_smoke.sh overrides it with an
+# absolute path so the build target directory does not matter.
+$elf ?= @firmware/target/thumbv7em-none-eabihf/release/potok-renode-smoke
+$platform ?= @platform/potok_stm32h743.repl
+
+using sysbus
+mach create "potok-renode-smoke"
+machine LoadPlatformDescription $platform
+
+# UART1 is observation only. The authoritative gate is the DTCM result word.
+showAnalyzer sysbus.usart1
+
+sysbus LoadELF $elf
+start
+sleep 2
+
+python """
+sb = self.Machine.SystemBus
+BASE = 0x2001F800
+stage = sb.ReadDoubleWord(BASE + 0x00)
+panic_line = sb.ReadDoubleWord(BASE + 0x04)
+ticks = sb.ReadDoubleWord(BASE + 0x08)
+pets = sb.ReadDoubleWord(BASE + 0x0C)
+unavail = sb.ReadDoubleWord(BASE + 0x10)
+sentinel = sb.ReadDoubleWord(BASE + 0x14)
+print("RENODE_SMOKE_RESULT stage=0x%08X panic_line=%d ticks=%d pets=%d unavail=%d sentinel=0x%08X" % (stage, panic_line, ticks, pets, unavail, sentinel))
+ok = (stage == 0xA5A5A5A5 and sentinel == 0x52454E4F and panic_line == 0 and ticks == 8 and pets > 0 and unavail > 0)
+if ok:
+    print("RENODE_SMOKE_PASS")
+else:
+    print("RENODE_SMOKE_FAIL")
+"""
+
+quit

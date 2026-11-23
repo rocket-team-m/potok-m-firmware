@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Emulator-only smoke. Passing here is NOT hardware validation; see docs/RENODE.md.
+name: renode
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    name: thumb ELF + Renode smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+
+      - name: Pin the rustup compiler ahead of any system rustc
+        run: |
+          echo "$(rustc --print sysroot)/bin" >> "$GITHUB_PATH"
+
+      - name: Host contract (no-panic board + marker protocol)
+        run: cargo test -p potok-m-firmware --test renode_smoke
+
+      - name: Build smoke ELF
+        run: |
+          cargo build --release --target thumbv7em-none-eabihf \
+            --manifest-path emulator/renode/firmware/Cargo.toml
+
+      - name: Install Renode (portable build)
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSLO https://builds.renode.io/renode-1.17.1.linux-portable.tar.gz
+          tar xf renode-1.17.1.linux-portable.tar.gz
+          RENODE_BIN="$(find "$RUNNER_TEMP" -maxdepth 3 -type f -name renode | head -1)"
+          test -n "$RENODE_BIN" || { echo "renode executable not found in portable archive" >&2; exit 1; }
+          chmod +x "$RENODE_BIN"
+          echo "$(dirname "$RENODE_BIN")" >> "$GITHUB_PATH"
+
+      - name: Run Renode smoke
+        run: emulator/renode/run_smoke.sh
+
+      - name: Upload Renode transcript on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: renode-smoke-log
+          path: /tmp/opencode/renode-smoke.log
+          if-no-files-found: ignore
