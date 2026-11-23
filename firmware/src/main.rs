@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Hardware adapter. Contains no protocol, phase or safety logic: it only
 //! wires Embassy to the testable core in `potok_m_firmware`.
 //!
@@ -111,6 +112,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 async fn main(_spawner: embassy_executor::Spawner) {
     use embassy_time::{Duration, Ticker};
     use potok_m_firmware::{
+        control::ShieldSample,
         interlocks::Interlocks,
         step,
         watchdog::{setup_iwdg, WatchdogPolicy},
@@ -128,8 +130,18 @@ async fn main(_spawner: embassy_executor::Spawner) {
     let mut policy = WatchdogPolicy::new();
     let mut ticker = Ticker::every(Duration::from_millis(2)); // 500 Hz
 
+    /// The shield's airdata seam. One place to swap in the real pitot/static
+    /// drivers when the schematic is filled in; no new pin is claimed here.
+    fn shield_sample(_board: &hw::HwBoard<'static>) -> ShieldSample {
+        // TODO(schematic): read pitot dynamic pressure and derive Mach from it
+        // plus static pressure. Until then the honest sample is UNAVAILABLE,
+        // which the shield vetoes with PitotInvalid: zero command.
+        ShieldSample::UNAVAILABLE
+    }
+
     loop {
         ticker.next().await;
+        link.set_shield_sample(shield_sample(&board));
         match step(
             &mut board,
             &mut fsm,
@@ -139,7 +151,12 @@ async fn main(_spawner: embassy_executor::Spawner) {
             true,
         ) {
             StepResult::FrameRejected => defmt::warn!("reply frame rejected"),
-            StepResult::Accepted(cmd) if cmd.is_zero() => defmt::info!("zero command"),
+            StepResult::Accepted(cmd) if cmd.is_zero() => defmt::info!(
+                "zero command (shield: mach={} pitot={} nonfinite={})",
+                link.shield_reasons.mach_limit,
+                link.shield_reasons.pitot_invalid,
+                link.shield_reasons.non_finite_mach
+            ),
             StepResult::Accepted(_) => defmt::info!("AI command applied"),
             StepResult::Idle => {}
         }

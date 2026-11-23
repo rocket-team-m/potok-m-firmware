@@ -6,7 +6,8 @@
 //! [`LinkState`] and [`Interlocks`]; nothing is reimplemented. The interlock is
 //! inserted *inside* the actuation path by [`Guarded`], so a command produced
 //! by the controller still has to pass the independent gate before it reaches
-//! the board.
+//! the board. Every command goes through [`Interlocks::evaluate_shield`], so
+//! the Mach/pitot gate is in the harness actuation path too.
 //!
 //! `lib.rs` is owned by the parent task, so this module is included by path in
 //! the host tests and benchmark. Their crate roots re-export the modules named
@@ -19,7 +20,7 @@
 
 use potok_m_firmware::{
     board::Board,
-    control::{step_link, LinkState, StepResult},
+    control::{step_link, LinkState, ReasonCounts, ShieldSample, StepResult},
     interlocks::{Decision, Input as InterlockInput, Interlocks, Refusal},
     phase::{PhaseEvent, PhaseFsm},
     protocol::{encode_reply, flags, Phase, ReplyFrame, REPLY_SIZE},
@@ -96,6 +97,10 @@ pub struct Tick {
     pub cycle_complete: bool,
     /// Fault injection: phase code the interlock decodes instead of the FSM's.
     pub phase_code_override: Option<u8>,
+    /// Pitot dynamic pressure (Pa) this tick supplies to the Mach shield.
+    pub pitot_dp: i16,
+    /// Mach estimate this tick supplies to the Mach shield.
+    pub mach_est: f32,
 }
 
 impl Tick {
@@ -108,6 +113,8 @@ impl Tick {
             motor_armed: false,
             cycle_complete: true,
             phase_code_override: None,
+            pitot_dp: ShieldSample::LEGACY_NO_SENSOR.pitot_dp,
+            mach_est: ShieldSample::LEGACY_NO_SENSOR.mach_est,
         }
     }
 
@@ -144,7 +151,18 @@ impl Tick {
             motor_armed: false,
             cycle_complete: true,
             phase_code_override: None,
+            pitot_dp: ShieldSample::LEGACY_NO_SENSOR.pitot_dp,
+            mach_est: ShieldSample::LEGACY_NO_SENSOR.mach_est,
         }
+    }
+
+    /// Supply the pitot dynamic pressure and Mach estimate the shield gates on.
+    /// Path-included into crates that do not script airdata, hence the allow.
+    #[allow(dead_code)]
+    pub const fn airdata(mut self, pitot_dp: i16, mach_est: f32) -> Self {
+        self.pitot_dp = pitot_dp;
+        self.mach_est = mach_est;
+        self
     }
 
     pub const fn event(mut self, event: PhaseEvent) -> Self {
@@ -198,6 +216,7 @@ struct Pending {
     flags: u8,
     ai_healthy: bool,
     now_us: u32,
+    sample: ShieldSample,
 }
 
 /// Board decorator that puts the independent interlock in the actuation path.
@@ -211,6 +230,8 @@ pub struct Guarded<B: Board> {
     pending: Pending,
     last_decision: Decision,
     last_requested: Command,
+    /// Per-reason tally of every shielded command in this run.
+    pub shield_reasons: ReasonCounts,
 }
 
 impl<B: Board> Guarded<B> {
@@ -223,6 +244,7 @@ impl<B: Board> Guarded<B> {
                 flags: 0,
                 ai_healthy: true,
                 now_us: 0,
+                sample: ShieldSample::LEGACY_NO_SENSOR,
             },
             last_decision: Decision {
                 command: Interlocks::FAILSAFE,
@@ -231,6 +253,7 @@ impl<B: Board> Guarded<B> {
                 limited: false,
             },
             last_requested: Command::ZERO,
+            shield_reasons: ReasonCounts::EMPTY,
         }
     }
 
@@ -291,13 +314,19 @@ impl<B: Board> Board for Guarded<B> {
     }
     fn apply_command(&mut self, cmd: Command) {
         self.last_requested = cmd;
-        let decision = self.gate.evaluate(InterlockInput {
-            phase_code: self.pending.phase_code,
-            flags: self.pending.flags,
-            ai_healthy: self.pending.ai_healthy,
-            requested: cmd,
-            now_us: self.pending.now_us,
-        });
+        let sample = self.pending.sample;
+        let decision = self.gate.evaluate_shield(
+            InterlockInput {
+                phase_code: self.pending.phase_code,
+                flags: self.pending.flags,
+                ai_healthy: self.pending.ai_healthy,
+                requested: cmd,
+                now_us: self.pending.now_us,
+            },
+            sample.pitot_dp,
+            sample.mach_est,
+        );
+        self.shield_reasons.note(decision.refusal);
         self.last_decision = decision;
         self.inner.apply_command(decision.command);
     }
@@ -431,6 +460,12 @@ impl<B: HarnessBoard> Simulator<B> {
         self.board.gate_mut()
     }
 
+    /// Per-reason tally of the harness shield; see `Guarded::shield_reasons`.
+    #[allow(dead_code)] // path-included into crates that only read the trace
+    pub fn shield_reasons(&self) -> ReasonCounts {
+        self.board.shield_reasons
+    }
+
     /// The only way out of an interlock latch, recorded in the trace.
     pub fn reset_gate<const CAP: usize>(&mut self, trace: &mut Trace<CAP>) {
         self.gate_mut().reset();
@@ -517,6 +552,10 @@ impl<B: HarnessBoard> Simulator<B> {
             flags: interlock_flags,
             ai_healthy,
             now_us,
+            sample: ShieldSample {
+                pitot_dp: spec.pitot_dp,
+                mach_est: spec.mach_est,
+            },
         });
 
         // The harness owns the independent interlock in `Guarded`, so it drives

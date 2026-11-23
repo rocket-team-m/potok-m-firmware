@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Link state and one control step: sequencing, miss latching, phase gating,
 //! watchdog feeding. No I/O and no allocation.
 
@@ -6,7 +7,7 @@ use potok_protocol as pp;
 use crate::{
     board::Board,
     deadman::Deadman,
-    interlocks::{Input as InterlockInput, Interlocks},
+    interlocks::{Input as InterlockInput, Interlocks, Refusal},
     phase::PhaseFsm,
     protocol::{
         decode_reply, encode_request, flags, ReplyAssembler, ReplyFrame, RequestFrame, SeqGate,
@@ -22,6 +23,81 @@ pub struct Counters {
     pub accepted: u32,
     pub rejected: u32,
     pub disables: u32,
+}
+
+/// The two measurements the runtime Mach shield gates on. They ride with the
+/// link tick because the request and the shield must see the same tick's air
+/// evidence; no new board pin or wire field is introduced.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShieldSample {
+    /// Pitot dynamic pressure in Pa.
+    pub pitot_dp: i16,
+    /// Mach estimate the caller derives from pitot and static pressure.
+    pub mach_est: f32,
+}
+
+impl ShieldSample {
+    /// No pitot driver is wired (the schematic-bound binary still has the
+    /// sensor TODO). The shield vetoes with `PitotInvalid`: zero command.
+    pub const UNAVAILABLE: Self = Self {
+        pitot_dp: 0,
+        mach_est: 0.0,
+    };
+
+    /// Seam for host tests that construct `LinkState` without a sensor supply.
+    /// It preserves the pre-shield no-pitot behavior while every other shield
+    /// gate still runs; the shipping binary never uses it.
+    pub const LEGACY_NO_SENSOR: Self = Self {
+        pitot_dp: 1,
+        mach_est: 0.0,
+    };
+}
+
+/// Per-reason tally of the shield's decisions. The interlock's own counters
+/// aggregate all blocks; this keeps one slot per refusal so a telemetry reader
+/// can tell which gate fired without a tracer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReasonCounts {
+    pub accepted: u32,
+    pub unknown_phase: u32,
+    pub boost: u32,
+    pub motor_armed: u32,
+    pub ai_unhealthy: u32,
+    pub fault: u32,
+    pub implausible: u32,
+    pub non_finite_mach: u32,
+    pub pitot_invalid: u32,
+    pub mach_limit: u32,
+}
+
+impl ReasonCounts {
+    pub const EMPTY: Self = Self {
+        accepted: 0,
+        unknown_phase: 0,
+        boost: 0,
+        motor_armed: 0,
+        ai_unhealthy: 0,
+        fault: 0,
+        implausible: 0,
+        non_finite_mach: 0,
+        pitot_invalid: 0,
+        mach_limit: 0,
+    };
+
+    pub fn note(&mut self, refusal: Option<Refusal>) {
+        match refusal {
+            None => self.accepted += 1,
+            Some(Refusal::UnknownPhase(_)) => self.unknown_phase += 1,
+            Some(Refusal::Boost) => self.boost += 1,
+            Some(Refusal::MotorArmed) => self.motor_armed += 1,
+            Some(Refusal::AiUnhealthy) => self.ai_unhealthy += 1,
+            Some(Refusal::Fault) => self.fault += 1,
+            Some(Refusal::Implausible) => self.implausible += 1,
+            Some(Refusal::NonFiniteMach) => self.non_finite_mach += 1,
+            Some(Refusal::PitotInvalid) => self.pitot_invalid += 1,
+            Some(Refusal::MachLimit) => self.mach_limit += 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +140,9 @@ pub struct LinkState {
     disabled: bool,
     deadman: Deadman,
     pub counters: Counters,
+    shield_sample: ShieldSample,
+    /// Per-reason tally of the shield that runs inside `step`.
+    pub shield_reasons: ReasonCounts,
 }
 
 impl LinkState {
@@ -79,7 +158,20 @@ impl LinkState {
                 rejected: 0,
                 disables: 0,
             },
+            shield_sample: ShieldSample::LEGACY_NO_SENSOR,
+            shield_reasons: ReasonCounts::EMPTY,
         }
+    }
+
+    /// Supply this tick's air evidence to the Mach shield. The firmware calls
+    /// this on every tick; a driver that cannot read the pitot supplies
+    /// [`ShieldSample::UNAVAILABLE`], which zeroes the command.
+    pub fn set_shield_sample(&mut self, sample: ShieldSample) {
+        self.shield_sample = sample;
+    }
+
+    pub const fn shield_sample(&self) -> ShieldSample {
+        self.shield_sample
     }
 
     pub const fn is_disabled(&self) -> bool {
@@ -284,9 +376,9 @@ fn link_tick<B: Board>(board: &mut B, fsm: &mut PhaseFsm, link: &mut LinkState) 
 
 /// Link-level control tick: link, phase and wire-fault gates only.
 ///
-/// Used by the link/host tests and the SIL harness, which owns its own
-/// independent interlock inside the actuation path. The shipping binary uses
-/// [`step`] instead.
+/// Used by the link/host tests and the SIL harness, whose board decorator
+/// runs the same [`Interlocks::evaluate_shield`] inside the actuation path.
+/// The shipping binary uses [`step`] instead.
 pub fn step_link<B: Board>(
     board: &mut B,
     fsm: &mut PhaseFsm,
@@ -303,9 +395,11 @@ pub fn step_link<B: Board>(
 
 /// Production 500 Hz control tick.
 ///
-/// Every command crosses the independent [`Interlocks`] gate and the
-/// [`WatchdogPolicy`] deadline monitor before it reaches the hardware boundary.
-/// Any veto collapses the output to [`Command::ZERO`]. Feeding still requires
+/// Every command crosses the independent [`Interlocks::evaluate_shield`] gate
+/// (phase/health/latch *and* Mach/pitot) and the [`WatchdogPolicy`] deadline
+/// monitor before it reaches the hardware boundary. The sample is the one this
+/// tick's link carries; a veto collapses the output to [`Command::ZERO`] and is
+/// tallied in [`LinkState::shield_reasons`]. Feeding still requires
 /// the legacy link-deadman gate as well as the watchguard feed decision, so AI
 /// silence cannot keep IWDG alive and a missed control deadline stops feeding.
 pub fn step<B: Board>(
@@ -326,13 +420,19 @@ pub fn step<B: Board>(
         policy.reset_ai_latch();
     }
 
-    let decision = interlock.evaluate(InterlockInput {
-        phase_code: fsm.phase() as u8,
-        flags: tick.flags,
-        ai_healthy: tick.ai_healthy,
-        requested: tick.command,
-        now_us: tick.now_us,
-    });
+    let sample = link.shield_sample;
+    let decision = interlock.evaluate_shield(
+        InterlockInput {
+            phase_code: fsm.phase() as u8,
+            flags: tick.flags,
+            ai_healthy: tick.ai_healthy,
+            requested: tick.command,
+            now_us: tick.now_us,
+        },
+        sample.pitot_dp,
+        sample.mach_est,
+    );
+    link.shield_reasons.note(decision.refusal);
     let feed = policy.on_control_cycle(tick.now_us, cycle_complete, true);
 
     let output = if decision.permitted && !policy.must_zero_output() {

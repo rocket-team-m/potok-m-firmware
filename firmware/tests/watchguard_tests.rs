@@ -7,16 +7,23 @@
 //! UART, no hardware and no `unsafe` are involved.
 
 use potok_m_firmware::{
+    control::ShieldSample,
+    interlocks::{Interlocks, Refusal},
     mock::MockBoard,
     phase::PhaseFsm,
     protocol::{encode_reply, flags, Phase, ReplyFrame, REPLY_SIZE},
-    step_link,
+    step, step_link,
     watchdog::{
         FeedDecision, Severity, WatchdogPolicy, CONTROL_PERIOD_US, DEADLINE_LIMIT,
         DEADLINE_SLACK_US,
     },
     Command, LinkState, PhaseEvent, StepResult, MAX_CONSECUTIVE_MISSES, MAX_CORRECTION_RAW,
 };
+
+// Path-included module exposes more helpers than this suite calls.
+#[allow(dead_code)]
+#[path = "../src/sil.rs"]
+mod sil;
 
 fn reply(seq: u16, pitch: i16, yaw: i16) -> ReplyFrame {
     ReplyFrame {
@@ -404,4 +411,134 @@ fn watchdog_ai_latch_and_deadline_monitor_recover_independently() {
         FeedDecision::Feed
     );
     assert!(!policy.must_zero_output());
+}
+
+// --- Runtime Mach shield in the shipping actuation path --------------------
+
+/// Drives the real `step()` with an explicit shield sample, exactly as the
+/// firmware does, and records what the board actually received.
+struct ShieldRig {
+    board: MockBoard,
+    fsm: PhaseFsm,
+    link: LinkState,
+    interlock: Interlocks,
+    policy: WatchdogPolicy,
+}
+
+impl ShieldRig {
+    fn coasting() -> Self {
+        Self {
+            board: MockBoard::new(),
+            fsm: coast(),
+            link: LinkState::new(),
+            interlock: Interlocks::default(),
+            policy: WatchdogPolicy::new(),
+        }
+    }
+
+    fn sample(&mut self, pitot_dp: i16, mach_est: f32) {
+        self.link.set_shield_sample(ShieldSample {
+            pitot_dp,
+            mach_est,
+        });
+    }
+
+    fn drive_reply(&mut self, pitch: i16, yaw: i16) -> StepResult {
+        let seq = next_seq(&self.link);
+        self.board.queue_reply(&reply(seq, pitch, yaw));
+        step(
+            &mut self.board,
+            &mut self.fsm,
+            &mut self.link,
+            &mut self.interlock,
+            &mut self.policy,
+            true,
+        )
+    }
+
+    fn applied(&self) -> Command {
+        applied(&self.board)
+    }
+}
+
+#[test]
+fn mach_limit_zeroes_the_command_before_the_board_and_counts_the_reason() {
+    let mut rig = ShieldRig::coasting();
+    rig.sample(1_000, 0.9); // default ceiling is 0.6
+
+    assert_eq!(
+        rig.drive_reply(8, -8),
+        StepResult::Accepted(Command::ZERO)
+    );
+    assert_eq!(rig.applied(), Command::ZERO, "no command reached the board");
+    assert_eq!(rig.interlock.counters.mach_blocked, 1);
+    assert_eq!(rig.link.shield_reasons.mach_limit, 1);
+    assert_eq!(rig.interlock.latched(), None, "MachLimit is transient");
+
+    // Recovery needs no reset; the shield re-evaluates on the next tick.
+    rig.sample(1_000, 0.5);
+    assert_eq!(
+        rig.drive_reply(8, -8),
+        StepResult::Accepted(Command { pitch: 8, yaw: -8 })
+    );
+    assert_eq!(rig.applied(), Command { pitch: 8, yaw: -8 });
+    assert_eq!(rig.link.shield_reasons.accepted, 1);
+}
+
+#[test]
+fn a_non_finite_mach_latches_and_holds_zero_until_reset() {
+    let mut rig = ShieldRig::coasting();
+    rig.sample(1_000, f32::NAN);
+
+    assert_eq!(rig.drive_reply(8, -8), StepResult::Accepted(Command::ZERO));
+    assert_eq!(rig.applied(), Command::ZERO);
+    assert_eq!(rig.interlock.latched(), Some(Refusal::NonFiniteMach));
+    assert_eq!(rig.interlock.counters.trips, 1);
+    assert_eq!(rig.link.shield_reasons.non_finite_mach, 1);
+
+    // A good sample cannot clear a fault latch; the reason keeps being counted.
+    rig.sample(1_000, 0.1);
+    assert_eq!(rig.drive_reply(8, -8), StepResult::Accepted(Command::ZERO));
+    assert_eq!(rig.applied(), Command::ZERO);
+    assert_eq!(rig.link.shield_reasons.non_finite_mach, 2);
+
+    rig.interlock.reset();
+    assert_eq!(rig.drive_reply(8, -8), StepResult::Accepted(Command { pitch: 8, yaw: -8 }));
+    assert_eq!(rig.applied(), Command { pitch: 8, yaw: -8 });
+}
+
+#[test]
+fn an_unusable_pitot_zeroes_without_latching_and_recovers() {
+    let mut rig = ShieldRig::coasting();
+    rig.sample(0, 0.1);
+
+    assert_eq!(rig.drive_reply(8, -8), StepResult::Accepted(Command::ZERO));
+    assert_eq!(rig.applied(), Command::ZERO);
+    assert_eq!(rig.link.shield_reasons.pitot_invalid, 1);
+    assert_eq!(rig.interlock.counters.mach_blocked, 0, "not a Mach-limit trip");
+    assert_eq!(rig.interlock.latched(), None);
+
+    rig.sample(1_000, 0.1);
+    assert_eq!(rig.drive_reply(8, -8), StepResult::Accepted(Command { pitch: 8, yaw: -8 }));
+    assert_eq!(rig.applied(), Command { pitch: 8, yaw: -8 });
+}
+
+#[test]
+fn the_sil_actuation_path_runs_the_same_mach_shield() {
+    let mut trace = sil::Trace::<8>::new();
+    let script = [
+        sil::Tick::reply(8, -8)
+            .event(PhaseEvent::Burnout)
+            .airdata(1_000, 0.9),
+        sil::Tick::reply(8, -8).airdata(1_000, 0.1),
+    ];
+    let sim = sil::simulate(MockBoard::new(), &script, &mut trace);
+
+    assert_eq!(trace.len(), 2);
+    assert_eq!(trace.records()[0].applied, Command::ZERO);
+    assert_eq!(trace.records()[0].interlock_refusal, Some(Refusal::MachLimit));
+    assert_eq!(trace.records()[1].applied, Command { pitch: 8, yaw: -8 });
+    assert_eq!(sim.shield_reasons().mach_limit, 1);
+    assert_eq!(sim.shield_reasons().accepted, 1);
+    assert_eq!(sim.gate().counters.mach_blocked, 1);
 }
