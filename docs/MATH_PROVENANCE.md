@@ -8,6 +8,18 @@ it consolidates the four per-family documents (`MATH_ATTITUDE.md`,
 for this consolidation — test rows below are transcribed from the named test
 files and from the audit, not executed here.
 
+**Update 2026-11-24 (CRC-1 only).** CRC-1 was re-gated against published
+vectors and is now `SOURCE`; the four tests in `firmware/tests/crc_math_tests.rs`
+were executed on this box and pass, as do clippy, `cargo fmt --check` and the
+`thumb` check. No other row was re-measured.
+
+**Update 2026-11-24 (DEP-1/DEP-4).** Both rows are closed by `docs/DEPLOYMENT_REQUIREMENTS.md`,
+which derives every `DeploymentConfig::DEFAULT` field from a stated requirement with arithmetic.
+No threshold was changed and the false "Verified thresholds" header was removed from
+`deployment.rs:28`. For these two rows `IN-TREE` names the derivation authority while `NO SOURCE`
+in the Source column applies to the numeric values: no flight log, drop test or standard exists in
+these trees. The status counts below are re-based on the CRC-1 update above.
+
 **Authority rule.** A source counts as *verified* only when a DOI/ISBN/arXiv ID
 or report number was resolved to a live record **and** the relevant equation,
 chapter or section was opened. Nothing is filled in from memory. Where no
@@ -46,6 +58,7 @@ Verified identifiers used below (all resolved, not invented):
 - **Isermann** — *Fault-Diagnosis Systems*, Springer 2006, **DOI 10.1007/3-540-30368-5** (method class only); companion **DOI 10.1016/j.arcontrol.2004.12.002**. Ray & Luck, IEEE CSM 11(2) 1991, **DOI 10.1109/37.67675** (redundancy naming). No page/equation of these books is claimed to be transcribed.
 - **Anderson** — *Fundamentals of Aerodynamics*, 5th ed., McGraw-Hill, **ISBN 978-0-07-339810-5**, Ch. 3 §3.4 (incompressible Bernoulli), Ch. 7 (speed of sound), Ch. 8 §8.7 Eq. (8.42) isentropic stagnation, Eq. (8.80) Rayleigh pitot (supersonic, **not** implemented), Example 8.3 (M=1 boundary).
 - **US76** — *U.S. Standard Atmosphere, 1976*, **NOAA-S/T-76-1562 / NASA-TM-X-74335 / NTRS 19770009539**: γ=1.4, `p₀=101325 Pa`, `a²=γp/ρ`.
+- **CRC-REF** — RevEng *Catalogue of parametrised CRC algorithms with 16 bits*, entry `CRC-16/IBM-3740` (aliases `CRC-16/AUTOSAR`, `CRC-16/CCITT-FALSE`), opened 2026-11-24 at <https://reveng.sourceforge.io/crc-catalogue/16.htm>: `poly=0x1021 init=0xffff refin=false refout=false xorout=0x0000 check=0x29b1`, plus seven codewords attributed to AUTOSAR Classic Platform **R22-11**, *Specification of CRC Routines*, **§7.2.2.1 p.26**. The AUTOSAR PDF itself was **not** opened; its codewords here are RevEng's transcription, independently recomputed by the local bitwise reference. The foil parameters come from the same catalogue's `CRC-16/ARC` (alias `CRC-IBM`) entry, `check=0xbb3d`.
 
 ---
 
@@ -129,12 +142,16 @@ Verified identifiers used below (all resolved, not invented):
 
 ## 7. Deployment / separation — `deployment.rs`, `separation.rs`
 
+For DEP-1/DEP-4, `IN-TREE` names the in-tree derivation in `docs/DEPLOYMENT_REQUIREMENTS.md`;
+`NO SOURCE` in the Source column applies to the numeric values, for which no flight log, drop test
+or airworthiness standard exists. The derivation states the missing measurement per field.
+
 | ID | Formula | file:line | Source | Status | Closed-form test | Remaining limitation |
 |---|---|---|---|---|---|---|
-| DEP-1 | Defaults `30/2/5/15/−1500/3/3` m,m,m,m,cm/s,samples,m, under a "Verified thresholds" header | `deployment.rs:28-59` | — | NO SOURCE (REQUIREMENT) | `deployment_tests.rs:54-70` pins literals (implementation, not the choice) | No flight-data analysis, standard or paper named. Needs flight-log ground truth or a range/airworthiness standard. |
+| DEP-1 | Defaults `30/2/5/15/−1500/3/3` m,m,m,m,cm/s,samples,m; header no longer calls them "Verified" | `deployment.rs:28-59` | `docs/DEPLOYMENT_REQUIREMENTS.md` (in-tree derivation); **NO SOURCE** for the numbers — no flight log, drop test or standard | IN-TREE (REQUIREMENT) | `deployment_tests.rs:54-70` pins literals (implementation, not the choice) | NO SOURCE for validation: `flights/README.md:5-8` puts raw logs in Releases `flight-NN`, none present here; `sim/config/parachute.toml:8-13` says no drop test exists. Per-field arithmetic, assumptions and missing measurement in the new doc; `docs/HIL_CHECKLIST.md:228` (D06) still has no owner-signed flight thresholds. |
 | DEP-2 | Config validation inequalities (floor < low ≤ apogee min; drop>0; climb>0; confirm>0; rate<0) | `deployment.rs:62-104` | — | IN-TREE (CHOICE) | `deployment_tests.rs:54-70` | Consistency constraints only; say nothing about threshold validity. |
 | DEP-3 | Peak tracking; saturating descent counter; reset on non-negative speed | `deployment.rs:216-241` | — | IN-TREE (FORMULA) | `deployment_tests.rs:72-103`, `:228-265` | State-machine logic, no external source claim. |
-| DEP-4 | Three triggers: apogee descent (peak≥5, alt≥30, alt≤peak−2, 3 desc ticks); fast descent (v≤−1500, alt≥3); low altitude (alt≤15, descent confirm) | `deployment.rs:243-260` | — | NO SOURCE (REQUIREMENT) | `deployment_tests.rs:154-226` exact trigger per case | Tests validate implementation of the decision table, not the choice of numbers. Same evidence gap as DEP-1. |
+| DEP-4 | Three triggers: apogee descent (peak≥5, alt≥30, alt≤peak−2, 3 desc ticks); fast descent (v≤−1500, alt≥3); low altitude (alt≤15, descent confirm) | `deployment.rs:243-260` | `docs/DEPLOYMENT_REQUIREMENTS.md` §§1–5 (in-tree derivation); **NO SOURCE** for the numbers | IN-TREE (REQUIREMENT) | `deployment_tests.rs:154-226` exact trigger per case | Each trigger now has a requirement, assumptions and arithmetic in the new doc; the test still validates the decision table, not the choice. NO SOURCE for exact values: no flight-log altitude/speed trace and no signed drop-test descent rate; `climb_confirm=5` is shown redundant below the 30 m apogee floor. |
 | DEP-5 | One-shot release; window by wire phase `COAST..=DESCENT` | `deployment.rs:301-306` | — | IN-TREE (CHOICE) | `deployment_tests.rs:267-316` | Assumes wire phase ordering is meaningful for a release window. |
 | SEP-1 | `spread = \|a−b\|` widened i64→u32 | `separation.rs:53-60` | — | IN-TREE (FORMULA) | `separation_tests.rs:358-370` full-range `u32::MAX` literal | Widening avoids `i32::MIN/MAX` overflow; no other limit. |
 | SEP-2 | Two arm channels OR-latched; both required before leaving Idle | `separation.rs:190-200` | — | IN-TREE (CHOICE) | `separation_tests.rs:55-111` | Design redundancy policy; no source claimed. |
@@ -171,14 +188,14 @@ Verified identifiers used below (all resolved, not invented):
 
 | ID | Formula | file:line | Source | Status | Closed-form test | Remaining limitation |
 |---|---|---|---|---|---|---|
-| CRC-1 | CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) for frames and telemetry | `protocol.rs:49-53`; `telemetry_log.rs:14`, `:112`, `:131`; `firmware/Cargo.toml:17` (rev `fdc485d`) | algorithm named; implementation external and not opened here | NO SOURCE (FORMULA) | none for frame/telemetry — encode→decode round-trip uses the same external function | No independent check vector in this repo. Need a published CCITT-FALSE test vector and a local assertion of polynomial/init. |
+| CRC-1 | CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, no final XOR) for frames and telemetry | `protocol.rs:49-53`; `protocol_link.rs:164`; `telemetry_log.rs:14`, `:112`, `:131`; `firmware/Cargo.toml:17` (rev `fdc485d`) | CRC-REF: RevEng `CRC-16/IBM-3740` (alias CCITT-FALSE) parameters + `check=0x29b1`; AUTOSAR R22-11 §7.2.2.1 p.26 codewords as transcribed there | SOURCE (FORMULA) | `crc_math_tests.rs::published_vectors_pin_poly_init_and_no_final_xor` (`"123456789"→0x29B1`, empty→`0xFFFF`, 5 AUTOSAR codewords); `::reply_frame_uses_ccitt_false_and_decoder_rejects_ibm_crc`, `::request_frame_...`, `::telemetry_record_...` — wire CRC matches an independent bitwise 0x1021/0xFFFF reference, differs from a CRC-16/IBM foil on the same frame, and both decoders refuse the IBM field | The external `crc16` is table-based and not opened here, so the frame gates are black-box on the covered bytes; AUTOSAR codewords are RevEng's transcription, not read from the AUTOSAR PDF. |
 | CRC-2 | Golden config CRC `0xABF7` over bytes `[1,0,0x50,0x4D,100,0,80,0]` | `self_test.rs:41-51` | — | IN-TREE (CHOICE) | `self_test_tests.rs:86-90` pins CRC and layout; audit recomputed independently → matches | Locally computed, not an external vector; only the 8-byte config image is covered. |
 | CRC-3 | `SeqGate`: `issue = last.wrapping_add(1)`; strict equality on reply | `protocol.rs:55-71` | — | IN-TREE (FORMULA) | `safety.rs`, `fault_inject_tests.rs:196-208` | One outstanding request assumption. |
 | CRC-4 | Reply assembler: magic `u16::from_le_bytes`, resync keeping newest byte as magic start | `protocol.rs:99-142` | — | IN-TREE (CHOICE) | `protocol_link_tests.rs` | Bytes before magic discarded without counting a miss (documented). |
 | CRC-5 | Double-buffer `back = 1−active`; swap `active = back`; overrun counted | `protocol_link.rs:20-69`; `uart.rs:36-72` | — | IN-TREE (CHOICE) | `protocol_link_tests.rs:110-135` | Buffer count is fixed at two. |
 | CRC-6 | Request template: patch seq/time/phase/flags at fixed offsets, recompute `pp::crc16` over `buf[..CRC_OFF]` | `protocol_link.rs:132-166` | protocol-owned offsets/CRC | IN-TREE (CHOICE) | `protocol_link_tests.rs` | Offsets owned by external crate; depends on CRC-1. |
 | CRC-7 | Locked-length assembler: after magic match, one slice copy of `REPLY_SIZE−len` | `protocol_link.rs:175-243` | — | IN-TREE (CHOICE) | `protocol_link_tests.rs` | Assumes the first two bytes cannot change once matched. |
-| CRC-8 | Telemetry record `HEADER_LEN=13`, `CRC_LEN=2`, `MIN_RECORD_SIZE=15`, LE fields, CRC trailing LE | `telemetry_log.rs:20-24`, `:78-115`, `:119-150` | protocol-owned CRC | IN-TREE (CHOICE) | `telemetry_log_tests.rs` round-trip only — **no** closed-form CRC value | Correctness of polynomial/init untested locally (CRC-1). |
+| CRC-8 | Telemetry record `HEADER_LEN=13`, `CRC_LEN=2`, `MIN_RECORD_SIZE=15`, LE fields, CRC trailing LE | `telemetry_log.rs:20-24`, `:78-115`, `:119-150` | protocol-owned CRC | IN-TREE (CHOICE) | `telemetry_log_tests.rs` round-trip; CRC field now pinned in `crc_math_tests.rs::telemetry_record_uses_ccitt_false_and_decoder_rejects_ibm_crc` | Record layout is local; the CRC parameters are gated under CRC-1. |
 | CRC-9 | Ring `write=(write+1)%N`; full → `head=write`; flush `head=(head+count)%N` | `telemetry_log.rs:297-352` | — | IN-TREE (CHOICE) | `telemetry_log_tests.rs` | Oldest-frame overwrite policy; no source claim. |
 | CRC-10 | Replay continuity `expected = last.wrapping_add(1)`; stop at first fault | `telemetry_log.rs:409-453` | — | IN-TREE (CHOICE) | `telemetry_log_tests.rs` | Sequence semantics local. |
 | CRC-11 | `LogGate`: state-change > debug > periodic cadence; `since_emit.saturating_add(1)` | `telemetry_log.rs:543-579` | — | IN-TREE (CHOICE) | `telemetry_log_tests.rs` | Logging policy, not a mathematical formula. |
@@ -222,7 +239,7 @@ derived equation, and none should be presented as one in a safety argument.
 |---|---|---|---|
 | Mach limit 0.6 (Safe profile 0.5) | `interlocks.rs:135`; `profile.rs:113`, `:155` | `docs/RUNTIME_SHIELD.md`, `vehicle/DESIGN_INPUT.md`; Safe value is a design choice | IN-TREE (REQUIREMENT) |
 | `max_command=100` raw (=0.1 rad), `max_delta=10` raw, `min_interval=1000 µs` | `interlocks.rs:132-134` | model scale / design choice | IN-TREE (REQUIREMENT) |
-| Deployment `30/2/5/15/−1500/3/3` | `deployment.rs:51-58` | none — header says "Verified" without evidence | **NO SOURCE (REQUIREMENT)** |
+| Deployment `30/2/5/15/−1500/3/3` | `deployment.rs:51-58` | `docs/DEPLOYMENT_REQUIREMENTS.md` derives each field; **NO SOURCE** for the numbers (no flight log/drop test/standard) | IN-TREE (REQUIREMENT) |
 | Separation delay/skew/sensor tolerance/separation level | `separation.rs:69-76` | design values | HEURISTIC (REQUIREMENT) |
 | IMU tolerance `0.05/0.02`, baro `0.5/0.02`; `stuck_samples=8` | `lib.rs:352-353`; `sensor_voting.rs:269` | design values; noise floors unmeasured | HEURISTIC (REQUIREMENT) |
 | Voting confidence `0.35/0.75/1.0`, penalty `0.8` | `sensor_voting.rs:41-46` | design values | HEURISTIC (CHOICE) |
@@ -240,27 +257,35 @@ once by its kind):
 
 | Status | Rows (12 formula tables) |
 |---|---|
-| SOURCE | 20 |
-| IN-TREE | 64 |
+| SOURCE | 21 |
+| IN-TREE | 66 |
 | HEURISTIC | 10 |
-| NO SOURCE | 7 |
+| NO SOURCE | 4 |
 | **Total** | **101** |
 
-The separate mission/requirement table adds 12 threshold rows (5 IN-TREE, 4
-HEURISTIC, 1 NO SOURCE, 1 mixed IN-TREE/NO-SOURCE for the unverified clock), so
-**113 rows total** in this ledger. The largest verified block is control
+DEP-1 and DEP-4 moved from `NO SOURCE` to `IN-TREE` on 2026-11-24 (+2 IN-TREE, −2 NO SOURCE);
+no value changed and no external citation was invented. The counts are re-based on the CRC-1 row
+above, which is already `SOURCE`.
+
+The separate mission/requirement table adds 12 threshold rows (6 IN-TREE, 5
+HEURISTIC, 0 NO SOURCE, 1 mixed IN-TREE/NO-SOURCE for the unverified clock), so
+**113 rows total** in this ledger. (The earlier ledger text said "4 HEURISTIC
+and 1 NO SOURCE" here; recounting the 12 rows gives 5 HEURISTIC and 1 NO SOURCE
+before DEP closure.) The largest verified block is control
 (Mahony Eq. 32, PID Eq. 3.x/13.x, Anderson Eq. 8.42). The largest unverified
 block is the set of mission thresholds and design constants that sit *next to*
-those sourced formulas: `HEURISTIC + NO SOURCE = 17` of 101 formula rows, plus
-5 of the 12 threshold rows.
+those sourced formulas: `HEURISTIC + NO SOURCE = 14` of 101 formula rows, plus
+5 of the 12 threshold rows (the mixed clock row carries the remaining NO-SOURCE
+flag). The deployment rows are now derived but still unvalidated — see
+`docs/DEPLOYMENT_REQUIREMENTS.md`.
 
 ## Top three remaining risks
 
-1. **Flight-critical thresholds with no source, one of them labelled "Verified".** `deployment.rs:28-59` / `:243-260` carries the six parachute triggers under a "Verified thresholds" header with no flight-data analysis, standard or paper; separation levels (`separation.rs:69-76`) and the voting tolerances/confidences (`lib.rs:352-353`, `sensor_voting.rs:37-46`) are likewise unmeasured. Their tests pin arithmetic, not the choice. Obtain flight-log ground truth, a range/airworthiness standard and measured sensor noise floors, then re-derive each number; until then none of these is a safety argument.
+1. **Flight-critical thresholds are still unvalidated, though no longer undocumented.** The six parachute values (`deployment.rs:28-59`, `:243-260`) are now derived as REQUIREMENTs in `docs/DEPLOYMENT_REQUIREMENTS.md` from the 500 Hz cadence, the 1 m altitude quantum and the simulator's explicitly-placeholder canopy model; the false "Verified" header is gone. No flight log, drop test or airworthiness standard exists in these trees, so each field names its missing measurement and `docs/HIL_CHECKLIST.md:228` (D06) still has no owner-signed flight thresholds. Separation levels (`separation.rs:69-76`) and voting tolerances/confidences (`lib.rs:352-353`, `sensor_voting.rs:37-46`) remain unmeasured HEURISTIC values. Tests pin arithmetic, not the choice; until the signed records exist, none of these is a safety argument.
 
 2. **Tested math that is not in the flying tick, on an unverified clock assumption.** Scheduler jitter/deadline math (`scheduler.rs:40-214`), calibration interpolation (`calibration_table.rs:139-200`), the timestamped FSM (`phase_fsm.rs:174-202`), and `perf`/`timing_budget` models have closed-form tests but no production caller (`main.rs:202,220` uses `Ticker::every(2 ms)`; `control::step` calls none of the Q15/gate/cycle helpers). `CORE_HZ=550e6` and the per-op cycle constants are assumptions, not measurements. No timing, jitter or calibration claim about the shipped tick is currently supported. Measure on the target board and wire the intended module before such a claim.
 
-3. **Airdata and phase reconstruction blind spots on the veto path.** The Mach solver is subsonic-only and its correctness depends on whether the driver reports impact pressure `q_c` or simulator `q=½ρV²` (MCH-2); `replay.rs:159-165` maps non-finite pitot to `0`, indistinguishable from a valid reading; `phase_code` (`replay.rs:194-212`) can call a stationary pad `Landed`; `above_subsonic` is absent from the `sil.rs` tally; and frame/telemetry CRC has no independent local vector (CRC-1). State the pressure quantity, add typed unavailable/out-of-domain reporting to replay and SIL, fix the phase ordering, and pin a published CRC test vector.
+3. **Airdata and phase reconstruction blind spots on the veto path.** The Mach solver is subsonic-only and its correctness depends on whether the driver reports impact pressure `q_c` or simulator `q=½ρV²` (MCH-2); `replay.rs:159-165` maps non-finite pitot to `0`, indistinguishable from a valid reading; `phase_code` (`replay.rs:194-212`) can call a stationary pad `Landed`; `above_subsonic` is absent from the `sil.rs` tally. State the pressure quantity, add typed unavailable/out-of-domain reporting to replay and SIL, and fix the phase ordering. CRC-1 is closed: published vectors and a frame-level poly/init gate are pinned in `crc_math_tests.rs`.
 
 ## Consolidation note
 
