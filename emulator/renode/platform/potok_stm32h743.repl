@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Renode platform for the Potok-M smoke image.
+// LEGACY H743 alias — no longer used by the smoke (FW723-RENODE).
+// The flight MCU is STM32H723; use potok_stm32h723.repl, which is an explicit
+// platform with the corrected H723 memory map. This file only names Renode's
+// built-in H743 platform and is kept for provenance only.
 //
 // The built-in CPU platform is the authority for the STM32H743 register map;
-// this file only names it and records the two facts the smoke relies on. No
-// peripheral is invented, remapped or stubbed here.
+// no peripheral is invented, remapped or stubbed here.
 //
 //   cpu        : Cortex-M7 at 0x00000000 ITCM / 0x08000000 flash
 //   flashBank1 : 1 MiB at 0x08000000 (the smoke ELF is far smaller)

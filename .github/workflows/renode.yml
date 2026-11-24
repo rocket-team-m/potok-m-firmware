@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Emulator-only smoke. Passing here is NOT hardware validation; see docs/RENODE.md.
+# STM32H723 emulator-only smoke. Passing here is NOT hardware validation; see docs/RENODE.md.
 name: renode
 
 on:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   smoke:
-    name: thumb ELF + Renode smoke
+    name: thumb ELF + STM32H723 Renode smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,10 +24,16 @@ jobs:
       - name: Host contract (no-panic board + marker protocol)
         run: cargo test -p potok-m-firmware --test renode_smoke
 
-      - name: Build smoke ELF
+      - name: Require explicit H723 platform definition
+        run: test -f emulator/renode/platform/potok_stm32h723.repl
+
+      - name: Build H723 smoke ELF
         run: |
           cargo build --release --target thumbv7em-none-eabihf \
             --manifest-path emulator/renode/firmware/Cargo.toml
+
+      - name: Gate H723 platform and ELF memory layout
+        run: emulator/renode/run_smoke.sh --check-only
 
       - name: Install Renode (portable build)
         run: |
@@ -39,7 +45,7 @@ jobs:
           chmod +x "$RENODE_BIN"
           echo "$(dirname "$RENODE_BIN")" >> "$GITHUB_PATH"
 
-      - name: Run Renode smoke
+      - name: Run Renode smoke on STM32H723 platform
         run: emulator/renode/run_smoke.sh
 
       - name: Upload Renode transcript on failure

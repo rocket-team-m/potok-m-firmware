@@ -1,14 +1,45 @@
 :name: potok-renode-smoke
-:description: Deterministic Renode smoke for the Potok-M control core.
+:description: Deterministic Renode smoke for the Potok-M control core on STM32H723.
 
 # The ELF path is relative to this script. run_smoke.sh overrides it with an
 # absolute path so the build target directory does not matter.
 $elf ?= @firmware/target/thumbv7em-none-eabihf/release/potok-renode-smoke
-$platform ?= @platform/potok_stm32h743.repl
+$platform ?= @platform/potok_stm32h723.repl
 
 using sysbus
 mach create "potok-renode-smoke"
 machine LoadPlatformDescription $platform
+
+# Gate 1: the loaded platform MUST be the H723 definition. Renode 1.17 has no
+# built-in stm32h723, so a typo or a fallback to H743 would otherwise load a
+# 2 MiB flash / 512 KiB AXI / 128 KiB SRAM1 map and still boot this tiny image.
+python """
+sb = self.Machine.SystemBus
+checks = [
+    (0x08000000, "flashBank1 registered at <0x08000000, 0x080FFFFF>"),
+    (0x08100000, "None"),
+    (0x00000000, "itcm registered at <0x00000000, 0x0000FFFF>"),
+    (0x20000000, "dtcm registered at <0x20000000, 0x2001FFFF>"),
+    (0x24000000, "axiSram registered at <0x24000000, 0x2404FFFF>"),
+    (0x24050000, "None"),
+    (0x30000000, "sram1 registered at <0x30000000, 0x30003FFF>"),
+    (0x30004000, "sram2 registered at <0x30004000, 0x30007FFF>"),
+    (0x30020000, "None"),
+    (0x30040000, "None"),
+    (0x38000000, "sram4 registered at <0x38000000, 0x38003FFF>"),
+    (0x38800000, "backupSram registered at <0x38800000, 0x38800FFF>")
+]
+bad = []
+for (address, want) in checks:
+    got = str(sb.FindMemory(address))
+    if want not in got:
+        bad.append("0x%08X:%s" % (address, got))
+if bad:
+    print("RENODE_H723_PLATFORM_FAIL " + "; ".join(bad))
+else:
+    print("RENODE_H723_PLATFORM_OK flash=1MiB itcm=64KiB dtcm=128KiB axi=320KiB sram1=16KiB sram2=16KiB@0x30004000 sram4=16KiB no-bank2=no-sram3")
+print("RENODE_H723_WARNING inherited STM32H743 peripheral models are APPROXIMATED for H723; NOT hardware validation")
+"""
 
 # UART1 is observation only. The authoritative gate is the DTCM result word.
 showAnalyzer sysbus.usart1
