@@ -48,3 +48,31 @@ This is a compiler-path fix, not a scope change. The gate still checks the
 same target (`thumbv7em-none-eabihf`) with the same rustup stable toolchain;
 nothing is skipped, relaxed or added. No firmware sources are touched. See
 [SIL.md](SIL.md) for what the `thumb` gate proves and what it does not.
+
+## What this gate does **not** prove (STM32H723 clock facts)
+
+The `thumb` check is a compile gate. It does not configure RCC, PWR or FLASH,
+program option bytes, or observe silicon. In particular it cannot establish any
+of the following STM32H723 facts, so none of them is claimed as verified here:
+
+| Item | Datasheet-backed value | Status on this board |
+|---|---|---|
+| Maximum core clock | 550 MHz, only at VOS0 with the `CPU_FREQ_BOOST` option byte; 520 MHz at VOS0 without it (ST DS13313 table 12, transcribed) | `NOT VERIFIED` |
+| AXI clock / flash latency | 275 MHz AXI at 550 MHz CPU; 3 wait states at 275 MHz AXI in VOS0 (RM0468 table 16, transcribed) — the wait-state table is indexed by AXI, not CPU frequency | `NOT VERIFIED` |
+| Core voltage | VCORE 1.35 V at VOS0; VDD ≥ 1.7 V with the internal LDO (DS13313 table 13 / §3.7.1, transcribed) | `NOT VERIFIED`; the rail itself is `NOT ASSIGNED` in [POWER_BUDGET.md](POWER_BUDGET.md) |
+| Boost side effect | `CPU_FREQ_BOOST` disables ITCM/DTCM ECC (RM0468, transcribed) | option-byte state `NOT ASSIGNED` |
+
+The cycle budget in `firmware/src/perf.rs` uses 550 MHz as a *configured input*
+and derives the allowance from it via `cycle_budget_for`; that is arithmetic,
+not evidence that the board runs at 550 MHz. `docs/POWER_BUDGET.md` §6 step 12
+is the procedure that would turn these `NOT VERIFIED` cells into readings.
+
+One discrepancy is visible from this repo alone and is **not fixed here**:
+`firmware/Cargo.toml` still selects the `stm32h743zi` Embassy chip feature
+(the `thumb` gate and the `.cargo/config.toml` runner do the same). That is
+an H743 part selection, not an H723 one, and is outside this task's file scope.
+It must be reconciled by the owner before any target build or flash; this
+document records it rather than silently treating the target as correct.
+
+No clock, voltage, wait-state, current or timing value in this document was
+measured on hardware, and no target run is claimed.

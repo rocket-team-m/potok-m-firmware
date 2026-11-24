@@ -26,10 +26,10 @@ use timing_budget::{
 fn tick_budget_constants_are_pinned() {
     assert_eq!(TICK_HZ, 500);
     assert_eq!(TICK_US, 2_000);
-    assert_eq!(CYCLES_PER_US, 480);
-    assert_eq!(TICK_CYCLES, 960_000);
+    assert_eq!(CYCLES_PER_US, 550);
+    assert_eq!(TICK_CYCLES, 1_100_000);
     assert_eq!(perf::CYCLE_BUDGET_US, 50);
-    assert_eq!(perf::CYCLE_BUDGET, 24_000);
+    assert_eq!(perf::CYCLE_BUDGET, 27_500);
     assert_eq!(CYCLES_PER_US * TICK_US, TICK_CYCLES);
     // 50 us out of 2000 us is 2.5% of a tick.
     assert_eq!(perf::CYCLE_BUDGET_US * TICK_HZ, 25_000);
@@ -83,15 +83,15 @@ fn worst_case_report_has_pinned_cycles_margin_and_utilization() {
     let report = BudgetReport::worst_case();
     assert_eq!(report.scenario, SIL_FRAME_FLOOD);
     assert_eq!(report.cycles, 856);
-    assert_eq!(report.budget, 24_000);
-    assert_eq!(report.margin_cycles, 23_144);
+    assert_eq!(report.budget, 27_500);
+    assert_eq!(report.margin_cycles, 26_644);
     assert_eq!(report.margin_us, 48);
     assert_eq!(report.tick_us, 2_000);
-    assert_eq!(report.tick_cycles, 960_000);
-    assert_eq!(report.tick_utilization_ppm, 891);
+    assert_eq!(report.tick_cycles, 1_100_000);
+    assert_eq!(report.tick_utilization_ppm, 778);
 
     assert_eq!(report.cycles + report.margin_cycles, report.budget);
-    assert_eq!(report.margin_us, report.margin_cycles / 480);
+    assert_eq!(report.margin_us, report.margin_cycles / 550);
     assert_eq!(report, BudgetReport::evaluate(SIL_FRAME_FLOOD));
     assert_eq!(report, BudgetReport::worst_case());
 }

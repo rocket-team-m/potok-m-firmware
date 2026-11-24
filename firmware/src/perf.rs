@@ -24,21 +24,51 @@
 //!   model can be checked against hardware once the pins are wired. No target
 //!   measurement is claimed here: every constant below is a source-derived
 //!   upper bound, reproduced identically on the host.
+//!
+//! Clock basis: STM32H723, not H743. The cycle allowance is derived from the
+//! configured core clock by [`cycle_budget_for`]; no H743 frequency literal is
+//! carried as the budget. Datasheet preconditions and their verification state
+//! are recorded in `docs/POWER_BUDGET.md` and `docs/TOOLCHAIN.md`.
 
 use potok_protocol::{flags, Phase, REPLY_SIZE, REQUEST_SIZE};
 
 use crate::{Command, MAX_CORRECTION_RAW};
 
-/// STM32H743 core clock at its rated maximum. The budget is quoted at this
-/// rate; a slower clock shortens the available cycles proportionally.
-pub const CORE_HZ: u32 = 480_000_000;
+/// STM32H723 core clock at its rated maximum: VOS0 with the CPU_FREQ_BOOST
+/// option byte set (520 MHz is the VOS0 limit without it). Source: ST DS13313
+/// table 12, as transcribed; see `docs/POWER_BUDGET.md`. NOT VERIFIED on the
+/// flight board — no clock configuration or measurement is claimed here.
+/// A slower configured clock shortens the allowance via [`cycle_budget_for`].
+pub const CORE_HZ: u32 = 550_000_000;
 /// One tick of the existing control loop (`control.rs`), in microseconds.
 pub const TICK_PERIOD_US: u32 = 2_000;
 /// Firmware-side allowance for one tick: 50 us at [`CORE_HZ`], 2.5% of a tick.
 /// The rest stays free for the codec, DMA, sensor drivers and scheduling.
 pub const CYCLE_BUDGET_US: u32 = 50;
+/// Flash wait states at 550 MHz core / 275 MHz AXI in VOS0 (ST RM0468 table 16,
+/// as transcribed). NOT VERIFIED on the flight board; re-derive from RM0468 if
+/// the AXI divider or voltage scale differs from this assumption.
+pub const FLASH_WAIT_STATES: u32 = 3;
+
+/// Core cycles in one microsecond at `core_hz`. The whole-MHz requirement is
+/// part of the configured-clock contract, not a hardware measurement.
+pub const fn cycles_per_us(core_hz: u32) -> u32 {
+    core_hz / 1_000_000
+}
+
+/// Cycle allowance for `budget_us` at `core_hz`. Single source of truth for the
+/// budget: no H743-era frequency literal remains in this module.
+pub const fn cycle_budget_for(core_hz: u32, budget_us: u32) -> u32 {
+    budget_us * cycles_per_us(core_hz)
+}
+
+/// Core cycles in one tick at `core_hz` and `tick_hz`.
+pub const fn tick_cycles_for(core_hz: u32, tick_hz: u32) -> u32 {
+    core_hz / tick_hz
+}
+
 /// Hard upper bound on the modelled hot path, in core cycles.
-pub const CYCLE_BUDGET: u32 = CYCLE_BUDGET_US * (CORE_HZ / 1_000_000);
+pub const CYCLE_BUDGET: u32 = cycle_budget_for(CORE_HZ, CYCLE_BUDGET_US);
 
 // Instruction costs used by the model. They are conservative upper bounds for
 // a Cortex-M7 (one table load, a handful of ALU ops per byte), not measurements
@@ -48,7 +78,10 @@ const CRC_BYTE_CYCLES: u32 = 4;
 const QUANT_FIELD_CYCLES: u32 = 12;
 const GATE_CYCLES: u32 = 12;
 const FIXED_AXIS_CYCLES: u32 = 4;
+/// Fixed per-tick overhead. It already absorbs one cold flash line fetch at
+/// [`FLASH_WAIT_STATES`]; no separate flash charge is added to the model.
 const FRAME_OVERHEAD_CYCLES: u32 = 200;
+const _: () = assert!(FRAME_OVERHEAD_CYCLES >= FLASH_WAIT_STATES);
 /// `Interlocks::evaluate_shield` in one tick: the five-way phase decode, four
 /// flag/health checks, the three Mach/pitot comparisons, plus plausibility and
 /// rate limiting on two axes. A conservative source-derived upper bound, not a
@@ -273,9 +306,44 @@ pub fn init_cycle_counter() {
     peripherals.DWT.enable_cycle_counter();
 }
 
-/// Raw CYCCNT snapshot. On a 480 MHz core, one tick is 960_000 counts.
+/// Raw CYCCNT snapshot. At [`CORE_HZ`] a 500 Hz tick is 1_100_000 counts by
+/// arithmetic; this is not a measured counter reading.
 #[cfg(target_os = "none")]
 #[inline(always)]
 pub fn read_cycles() -> u32 {
     cortex_m::peripheral::DWT::cycle_count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The budget must follow the configured clock. If a future edit pins the
+    /// old H743 number (480 MHz) as the budget source, the 550 MHz assertion
+    /// below fails instead of silently budgeting the wrong chip.
+    #[test]
+    fn cycle_budget_scales_with_the_configured_clock() {
+        let mut previous = 0;
+        for &hz in &[400_000_000, 480_000_000, 520_000_000, 550_000_000] {
+            let budget = cycle_budget_for(hz, CYCLE_BUDGET_US);
+            assert_eq!(budget, CYCLE_BUDGET_US * cycles_per_us(hz), "clock {hz}");
+            assert!(budget > previous, "clock {hz}");
+            previous = budget;
+        }
+        assert_eq!(cycle_budget_for(480_000_000, 50), 24_000);
+        assert_eq!(cycle_budget_for(550_000_000, 50), 27_500);
+        assert_eq!(CYCLE_BUDGET, cycle_budget_for(CORE_HZ, CYCLE_BUDGET_US));
+        assert_eq!(CYCLE_BUDGET, 27_500);
+    }
+
+    #[test]
+    fn tick_and_microsecond_cycles_follow_the_configured_clock() {
+        assert_eq!(cycles_per_us(CORE_HZ), 550);
+        assert_eq!(tick_cycles_for(CORE_HZ, 500), 1_100_000);
+        assert_eq!(tick_cycles_for(480_000_000, 500), 960_000);
+        assert_eq!(
+            cycles_per_us(CORE_HZ) * 2_000,
+            tick_cycles_for(CORE_HZ, 500)
+        );
+    }
 }

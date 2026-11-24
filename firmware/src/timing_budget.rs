@@ -18,17 +18,21 @@
 //! additionally checked at compile time.
 
 use potok_m_firmware::{
-    perf::{CycleEstimate, CORE_HZ, CYCLE_BUDGET, CYCLE_BUDGET_US},
+    perf::{
+        cycle_budget_for, cycles_per_us, tick_cycles_for, CycleEstimate, CORE_HZ, CYCLE_BUDGET,
+        CYCLE_BUDGET_US,
+    },
     scheduler::TICK_HZ,
 };
 use potok_protocol::{REPLY_SIZE, REQUEST_SIZE};
 
-/// Core cycles in one microsecond at [`CORE_HZ`].
-pub const CYCLES_PER_US: u32 = CORE_HZ / 1_000_000;
+/// Core cycles in one microsecond at the configured [`CORE_HZ`] (550 for the
+/// STM32H723). Derived, not measured; not an H743 constant.
+pub const CYCLES_PER_US: u32 = cycles_per_us(CORE_HZ);
 /// Microseconds in one 500 Hz tick.
 pub const TICK_US: u32 = 1_000_000 / TICK_HZ;
 /// Core cycles available in one tick before any deadline is missed.
-pub const TICK_CYCLES: u32 = CORE_HZ / TICK_HZ;
+pub const TICK_CYCLES: u32 = tick_cycles_for(CORE_HZ, TICK_HZ);
 
 const _: () = assert!(TICK_HZ == 500, "timing budget is defined at 500 Hz");
 const _: () = assert!(TICK_US == 2_000);
@@ -155,29 +159,40 @@ pub struct BudgetReport {
 }
 
 impl BudgetReport {
-    /// Account one scenario, refusing loudly if it does not fit the budget.
-    pub fn evaluate(scenario: Scenario) -> Self {
+    /// Account one scenario at an explicit configured core clock.
+    ///
+    /// Every field that depends on the clock is computed from `core_hz`; the
+    /// scenario's instruction counts are clock-independent. An overrun is LOUD
+    /// and names the clock the budget was evaluated at.
+    pub fn evaluate_at(scenario: Scenario, core_hz: u32) -> Self {
+        assert!(core_hz >= 1_000_000, "core clock must be at least 1 MHz");
         let cycles = scenario.cycles();
+        let budget = cycle_budget_for(core_hz, CYCLE_BUDGET_US);
         assert!(
-            cycles <= CYCLE_BUDGET,
-            "500 Hz timing budget exceeded: {} = {} cycles, budget {} cycles ({} us at {} Hz)",
+            cycles <= budget,
+            "500 Hz timing budget exceeded: {} = {} cycles, budget {} cycles ({} us at {} Hz core)",
             scenario.name,
             cycles,
-            CYCLE_BUDGET,
+            budget,
             CYCLE_BUDGET_US,
-            TICK_HZ
+            core_hz
         );
-        let margin_cycles = CYCLE_BUDGET - cycles;
+        let margin_cycles = budget - cycles;
         Self {
             scenario,
             cycles,
-            budget: CYCLE_BUDGET,
+            budget,
             margin_cycles,
-            margin_us: margin_cycles / CYCLES_PER_US,
+            margin_us: margin_cycles / cycles_per_us(core_hz),
             tick_us: TICK_US,
-            tick_cycles: TICK_CYCLES,
-            tick_utilization_ppm: cycles * 1_000_000 / TICK_CYCLES,
+            tick_cycles: tick_cycles_for(core_hz, TICK_HZ),
+            tick_utilization_ppm: cycles * 1_000_000 / tick_cycles_for(core_hz, TICK_HZ),
         }
+    }
+
+    /// Account one scenario at the configured [`CORE_HZ`].
+    pub fn evaluate(scenario: Scenario) -> Self {
+        Self::evaluate_at(scenario, CORE_HZ)
     }
 
     /// The modelled worst case, with the same LOUD refusal as any scenario.
@@ -201,4 +216,29 @@ pub fn assert_tick_budget() -> BudgetReport {
         "SIL_FRAME_FLOOD must dominate the declared scenario set"
     );
     worst
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The report must be a function of the configured clock. Pinning the old
+    /// H743 480 MHz values here would keep the H723 budget silently wrong.
+    #[test]
+    fn budget_report_fields_scale_with_the_configured_clock() {
+        let reference = BudgetReport::evaluate_at(SIL_FRAME_FLOOD, 480_000_000);
+        let h723 = BudgetReport::evaluate_at(SIL_FRAME_FLOOD, 550_000_000);
+
+        assert_eq!(reference.budget, 24_000);
+        assert_eq!(h723.budget, 27_500);
+        assert_eq!(reference.tick_cycles, 960_000);
+        assert_eq!(h723.tick_cycles, 1_100_000);
+        assert_eq!(reference.tick_utilization_ppm, 891);
+        assert_eq!(h723.tick_utilization_ppm, 778);
+        assert_eq!(h723.margin_cycles, 26_644);
+        assert_eq!(h723.margin_us, 48);
+        assert_eq!(BudgetReport::evaluate(SIL_FRAME_FLOOD), h723);
+        assert_eq!(CYCLES_PER_US, 550);
+        assert_eq!(TICK_CYCLES, 1_100_000);
+    }
 }

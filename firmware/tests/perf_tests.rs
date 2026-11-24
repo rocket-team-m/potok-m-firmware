@@ -165,9 +165,9 @@ fn q15_refuses_oversized_gain() {
 #[test]
 fn cycle_model_is_pinned_and_inside_the_budget() {
     assert_eq!(TICK_PERIOD_US, 2_000);
-    assert_eq!(CORE_HZ, 480_000_000);
+    assert_eq!(CORE_HZ, 550_000_000);
     assert_eq!(CYCLE_BUDGET_US, 50);
-    assert_eq!(CYCLE_BUDGET, 24_000);
+    assert_eq!(CYCLE_BUDGET, 27_500);
 
     let accepted = CycleEstimate::new(
         REPLY_SIZE as u32,
