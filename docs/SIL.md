@@ -24,7 +24,7 @@ clippy and the ordinary workspace test/check gates), not a replacement for it.
 | Host SIL suite | `cargo test --workspace` | Every host integration gate passes: safety, protocol link, phase FSM, interlocks, PID, attitude, deployment, separation, sensor voting, self-test, telemetry, scheduler, watchdog, buzzer, calibration and the cycle model. Catches gates added later that the focused steps below do not name. |
 | Fault-injection gates | `cargo test --test safety --test watchguard_tests --test protocol_link_tests` | Corrupt CRC/magic/version/seq, stale and wrapped seq, noise without magic, split DMA frames, repeated DMA submission, mixed bad frames plus timeout, silent link and `ai_healthy = 0` all drive the three-strike latch and a `Command::ZERO` output. Re-runs the wire-fault subset so a red step names the failing class. |
 | Timing-budget gates | `cargo test --test perf_tests --test scheduler_tests --test watchdog_tests` | The cycle model is pinned (716 accepted / 708 rejected / 556 idle cycles against a 24 000-cycle, 50 µs budget at 480 MHz), the 500 Hz tick grid and jitter accounting hold, and the watchdog deadline monitor (250 µs slack, 3 missed deadlines) and feed policy behave. Focused re-run for attribution; these are arithmetic/model checks, not measurements on silicon. |
-| thumb `no_std` check | `cargo check --target thumbv7em-none-eabihf` | The real Embassy adapter, IWDG setup and linker configuration still compile for Cortex-M7, and no host-only code leaks into the target build. It does **not** flash or run anything. |
+| thumb `no_std` check | `RUSTC=$(rustup which rustc --toolchain stable) cargo check --target thumbv7em-none-eabihf` | The real Embassy adapter, IWDG setup and linker configuration still compile for Cortex-M7, and no host-only code leaks into the target build. It does **not** flash or run anything. |
 
 Run the same four commands locally before a board session:
 
@@ -32,7 +32,7 @@ Run the same four commands locally before a board session:
 cargo test --workspace
 cargo test --test safety --test watchguard_tests --test protocol_link_tests
 cargo test --test perf_tests --test scheduler_tests --test watchdog_tests
-cargo check --target thumbv7em-none-eabihf
+RUSTC=$(rustup which rustc --toolchain stable) cargo check --target thumbv7em-none-eabihf
 ```
 
 ## What SIL covers
