@@ -4,9 +4,10 @@
 //! `Interlocks::evaluate_shield` gates on a Mach estimate the caller derives
 //! from pitot dynamic pressure and barometric static pressure. This module is
 //! that caller: it reads both through the [`Airdata`] trait (no pins, no HAL,
-//! no wire field), derives Mach with deterministic `f32` arithmetic — no
-//! `libm` — validates the readings and the result, and returns a typed
-//! `ShieldSample`.
+//! no wire field), derives subsonic Mach from the isentropic Pitot relation
+//! with deterministic `f32` arithmetic — no `libm` — validates the readings
+//! and the result, and returns a typed `ShieldSample`. A ratio outside the
+//! subsonic domain is refused, never clamped to M = 1.
 //!
 //! A missing driver is a counted [`Unavailable`] reason, never a fabricated
 //! zero that would look like healthy airspeed evidence to the shield.
@@ -16,6 +17,24 @@ use potok_m_firmware::control::ShieldSample;
 /// Ratio of specific heats for air: `a^2 = GAMMA * p / rho`. The simulator's
 /// atmosphere uses the same value, so this Mach matches its `speed / a`.
 const GAMMA: f32 = 1.4;
+/// `(GAMMA - 1) / 2` for air.
+const B: f32 = (GAMMA - 1.0) * 0.5;
+
+/// Why the isentropic Mach solve could not produce a sample.
+///
+/// Kept separate from [`Unavailable`] so the math seam can name a supersonic
+/// ratio without pretending the reading was non-finite. The sampler maps each
+/// case to a counted fallback below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MachError {
+    /// A pressure, their ratio, or the derived Mach is not finite.
+    NonFinite,
+    /// A pressure is zero or negative — impossible for a pitot/static pair.
+    NonPositive,
+    /// `q_c/p` is at or above the M = 1 Pitot limit. The subsonic relation has
+    /// no solution here; this is refused loudly, never clamped.
+    AboveSubsonicLimit,
+}
 
 /// The board-facing airdata seam. No pin or peripheral is claimed here: the
 /// schematic-bound `HwBoard` returns `None` until its drivers are wired.
@@ -60,6 +79,8 @@ pub struct UnavailableCounts {
     pub no_driver: u32,
     pub non_finite: u32,
     pub non_positive: u32,
+    /// Samples refused because `q_c/p` is outside the subsonic Pitot domain.
+    pub above_subsonic: u32,
 }
 
 impl UnavailableCounts {
@@ -69,6 +90,10 @@ impl UnavailableCounts {
             Unavailable::NonFinite => self.non_finite += 1,
             Unavailable::NonPositive => self.non_positive += 1,
         }
+    }
+
+    pub fn note_above_subsonic(&mut self) {
+        self.above_subsonic += 1;
     }
 }
 
@@ -85,6 +110,7 @@ impl ShieldSampler {
                 no_driver: 0,
                 non_finite: 0,
                 non_positive: 0,
+                above_subsonic: 0,
             },
         }
     }
@@ -95,8 +121,12 @@ impl ShieldSampler {
     pub fn sample<S: Airdata>(&mut self, source: &S) -> ShieldSample {
         match Self::derive(source) {
             Ok(sample) => sample,
-            Err(reason) => {
+            Err(DeriveError::Unavailable(reason)) => {
                 self.unavailable.note(reason);
+                ShieldSample::UNAVAILABLE
+            }
+            Err(DeriveError::AboveSubsonic) => {
+                self.unavailable.note_above_subsonic();
                 ShieldSample::UNAVAILABLE
             }
         }
@@ -106,31 +136,93 @@ impl ShieldSampler {
         self.unavailable
     }
 
-    fn derive<S: Airdata>(source: &S) -> Result<ShieldSample, Unavailable> {
+    fn derive<S: Airdata>(source: &S) -> Result<ShieldSample, DeriveError> {
         let (Some(dp), Some(p)) = (source.pitot_dp_pa(), source.static_pa()) else {
-            return Err(Unavailable::NoDriver);
+            return Err(DeriveError::Unavailable(Unavailable::NoDriver));
         };
-        if !dp.is_finite() || !p.is_finite() {
-            return Err(Unavailable::NonFinite);
+        match mach_from_pitot(dp, p) {
+            Ok(mach) => Ok(ShieldSample {
+                pitot_dp: dp as i16,
+                mach_est: mach,
+            }),
+            Err(MachError::NonFinite) => Err(DeriveError::Unavailable(Unavailable::NonFinite)),
+            Err(MachError::NonPositive) => Err(DeriveError::Unavailable(Unavailable::NonPositive)),
+            Err(MachError::AboveSubsonicLimit) => Err(DeriveError::AboveSubsonic),
         }
-        if dp <= 0.0 || p <= 0.0 {
-            return Err(Unavailable::NonPositive);
-        }
-        // q = rho*V^2/2 and a^2 = GAMMA*p/rho give M^2 = 2q/(GAMMA*p).
-        // This slightly overestimates the isentropic Mach, which is on the
-        // conservative side of a ceiling gate.
-        let mach = sqrt_approx((2.0 * dp) / (GAMMA * p));
-        if !mach.is_finite() {
-            return Err(Unavailable::NonFinite);
-        }
-        if mach <= 0.0 {
-            return Err(Unavailable::NonPositive);
-        }
-        Ok(ShieldSample {
-            pitot_dp: dp as i16,
-            mach_est: mach,
-        })
     }
+}
+
+/// Internal split so an out-of-domain ratio gets its own counter without
+/// masquerading as a non-finite sensor reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeriveError {
+    Unavailable(Unavailable),
+    AboveSubsonic,
+}
+
+/// `(1 + B*M^2)^7` with `u = 1 + B*M^2`, by three stable multiplications.
+/// Positive `u` keeps the map monotone, so the bisection below cannot
+/// oscillate on rounding. Raising both sides of the Pitot relation to the
+/// second power turns the fractional exponent `GAMMA/(GAMMA-1) = 3.5` into
+/// the integer exponent 7: no `powf`, no `exp`, no `libm`.
+const fn pow7(u: f32) -> f32 {
+    let u2 = u * u;
+    let u3 = u2 * u;
+    let u6 = u3 * u3;
+    u6 * u
+}
+
+/// `(1 + B)^7` — the squared impact-pressure ratio at M = 1.
+const SUBSONIC_SQ_LIMIT: f32 = pow7(1.0 + B);
+
+/// Bisection sweeps are a fixed count, so the result is bit-reproducible:
+/// no convergence branch and no host-device round-trip. 32 halvings of
+/// `[0, 1]` resolve `M^2` far below one f32 ULP.
+const BISECTION_STEPS: u32 = 32;
+
+/// Solve the subsonic isentropic Pitot relation for Mach:
+///
+/// `q_c/p = (1 + (GAMMA-1)/2 * M^2)^(GAMMA/(GAMMA-1)) - 1`,
+///
+/// with impact pressure `q_c = p_t - p = dp` (Anderson, *Fundamentals of
+/// Aerodynamics*, compressible Pitot formula). Squaring gives an equivalent
+/// monotone equation in `x = M^2`:
+///
+/// `(1 + B*x)^7 = (1 + dp/p)^2`,
+///
+/// solved by fixed-count bisection on `x ∈ [0, 1]` and one Newton-refined
+/// bit-trick square root. Ratios at or above the M = 1 limit are refused with
+/// [`MachError::AboveSubsonicLimit`] — there is no subsonic solution, so the
+/// caller must not be handed a clamped M = 1 sample.
+pub fn mach_from_pitot(dp: f32, p: f32) -> Result<f32, MachError> {
+    if !dp.is_finite() || !p.is_finite() {
+        return Err(MachError::NonFinite);
+    }
+    if dp <= 0.0 || p <= 0.0 {
+        return Err(MachError::NonPositive);
+    }
+
+    let r = dp / p;
+    let target = (1.0 + r) * (1.0 + r);
+    if !target.is_finite() || target >= SUBSONIC_SQ_LIMIT {
+        return Err(MachError::AboveSubsonicLimit);
+    }
+
+    let mut lo = 0.0f32;
+    let mut hi = 1.0f32;
+    for _ in 0..BISECTION_STEPS {
+        let mid = 0.5 * (lo + hi);
+        if pow7(1.0 + B * mid) < target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let mach = sqrt_approx(0.5 * (lo + hi));
+    if !mach.is_finite() || mach <= 0.0 {
+        return Err(MachError::NonFinite);
+    }
+    Ok(mach)
 }
 
 /// Bit-trick seed plus four Newton steps: deterministic and `libm`-free. The

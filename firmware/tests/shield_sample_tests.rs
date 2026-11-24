@@ -40,7 +40,7 @@ fn coast_command() -> Input {
 
 #[test]
 fn mach_is_derived_deterministically_from_pitot_and_static() {
-    // q = gamma*p*M^2/2 at M = 0.6, sea level p = 101325 Pa.
+    // Isentropic q_c/p at M = 0.6, sea level p = 101325 Pa: dp ~= 25534 Pa.
     let src = Fixed {
         dp: Some(25_534.0),
         p: Some(101_325.0),
@@ -51,7 +51,7 @@ fn mach_is_derived_deterministically_from_pitot_and_static() {
 
     assert_eq!(a, b, "same pressures must give the same bits every tick");
     assert_eq!(a.pitot_dp, 25_534);
-    assert!((a.mach_est - 0.6).abs() < 1e-3, "got {}", a.mach_est);
+    assert!((a.mach_est - 0.575_842).abs() < 1e-3, "got {}", a.mach_est);
     assert!(a.mach_est.is_finite() && a.mach_est > 0.0);
     assert_eq!(sampler.unavailable_counts(), UnavailableCounts::default());
 }
@@ -64,7 +64,7 @@ fn mach_responds_to_both_pressures_in_the_right_direction() {
         p: Some(50_000.0),
     });
     assert!(
-        (base.mach_est - 0.169_030_5).abs() < 1e-4,
+        (base.mach_est - 0.168_433).abs() < 1e-4,
         "got {}",
         base.mach_est
     );
