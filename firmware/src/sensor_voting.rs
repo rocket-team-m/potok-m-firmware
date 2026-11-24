@@ -7,34 +7,53 @@
 //! must always mean the same physical sensor; slot 2 is simply absent in a
 //! dual-sensor installation.
 //!
-//! Selection is the median for three readings (the medoid under
-//! [`Sample::distance`], which is the ordinary median on a scalar) and the
+//! Selection is the median for three readings (the medoid under the
+//! dimensionless separation defined by [`Sample::separation`]) and the
 //! midpoint for two. A sensor quarantined as stuck is excluded before
 //! selection. A sensor is only flagged stuck when its reading has been
 //! bit-identical for [`Config::stuck_samples`] ticks *and* another sensor has
 //! moved beyond tolerance, so a stationary vehicle cannot quarantine its
 //! sensors. Disagreement is reported from the remaining sensors; a dual vote
 //! cannot arbitrate which one is wrong and never names an outlier.
+//!
+//! **Fault-detection method.** This is analytic (hardware) redundancy: with
+//! two or three sensors measuring the same quantity, the residual between
+//! readings is compared with a threshold to generate a fault indicator; the
+//! third channel, when present, isolates the faulty one by consensus. This is
+//! the standard residual/threshold/isolation scheme of R. Isermann,
+//! *Fault-Diagnosis Systems*, Springer (2006), DOI 10.1007/3-540-30368-5.
+//! No flight or hardware validation is claimed here; see `docs/MATH_VOTING.md`
+//! for the exact scope and for which numbers remain HEURISTIC.
+//!
+//! **Units.** A residual is `|Δ| / (absolute + relative·scale)`, dimensionless,
+//! and a fault is indicated when it exceeds 1. Gyro differences are divided
+//! by a limit in rad/s, accelerometer differences by a limit in m/s², each
+//! with its own relative term. Unlike physical channels are never compared by
+//! raw magnitude.
 
 /// Maximum number of readings considered per tick.
 pub const SENSOR_COUNT: usize = 3;
 
-/// Per-slot confidence before any disagreement penalty.
-const CONF_SINGLE: f32 = 0.35;
-const CONF_DUAL: f32 = 0.75;
-const CONF_TRIPLE: f32 = 1.0;
-/// Confidence lost per unit of disagreement-threshold overshoot.
-const DISAGREEMENT_PENALTY: f32 = 0.8;
+/// HEURISTIC (F3): per-slot confidence before any disagreement penalty.
+/// No paper, calibration or flight datum supports these three numbers; they
+/// are kept only for protocol compatibility and must be re-derived before a
+/// confidence value is used as a safety argument. See `docs/MATH_VOTING.md`.
+const HEURISTIC_CONF_SINGLE: f32 = 0.35;
+const HEURISTIC_CONF_DUAL: f32 = 0.75;
+const HEURISTIC_CONF_TRIPLE: f32 = 1.0;
+/// HEURISTIC (F3): confidence lost per unit of threshold overshoot. Same
+/// caveat as the three base values: this is a shape choice, not a measurement.
+const HEURISTIC_DISAGREEMENT_PENALTY: f32 = 0.8;
 
 /// A reading that can be voted on: scalars (barometer) or vectors (IMU axes).
 pub trait Sample: Copy {
     fn is_finite(self) -> bool;
-    /// Non-negative scalar separation, zero only for identical readings.
-    fn distance(self, other: Self) -> f32;
+    /// Dimensionless residual against `other` under `tol`; `> 1.0` means the
+    /// two readings disagree by more than the configured fault threshold.
+    /// Zero only for identical readings.
+    fn separation(self, other: Self, tol: Tolerance) -> f32;
     /// Deterministic value halfway between two readings.
     fn midpoint(self, other: Self) -> Self;
-    /// Scalar magnitude used by the relative part of [`Tolerance`].
-    fn scale(self) -> f32;
 }
 
 fn finite(x: f32) -> bool {
@@ -61,21 +80,32 @@ fn clamp01(x: f32) -> f32 {
     x.clamp(0.0, 1.0)
 }
 
+/// `distance / limit`, with the legacy convention that a non-positive limit
+/// yields zero. Callers must configure positive absolute thresholds.
+fn residual(distance: f32, limit: f32) -> f32 {
+    if limit > 0.0 {
+        distance / limit
+    } else {
+        0.0
+    }
+}
+
 impl Sample for f32 {
     fn is_finite(self) -> bool {
         finite(self)
     }
 
-    fn distance(self, other: Self) -> f32 {
-        abs_diff(self, other)
+    fn separation(self, other: Self, tol: Tolerance) -> f32 {
+        let scale = if self.abs() > other.abs() {
+            self.abs()
+        } else {
+            other.abs()
+        };
+        residual(abs_diff(self, other), tol.absolute + tol.relative * scale)
     }
 
     fn midpoint(self, other: Self) -> Self {
         (self + other) * 0.5
-    }
-
-    fn scale(self) -> f32 {
-        abs(self)
     }
 }
 
@@ -88,12 +118,20 @@ impl<const N: usize> Sample for [f32; N] {
         ok
     }
 
-    fn distance(self, other: Self) -> f32 {
+    fn separation(self, other: Self, tol: Tolerance) -> f32 {
         let mut worst = 0.0;
         for i in 0..N {
-            let d = abs_diff(self[i], other[i]);
-            if d > worst {
-                worst = d;
+            let scale = if abs(self[i]) > abs(other[i]) {
+                abs(self[i])
+            } else {
+                abs(other[i])
+            };
+            let r = residual(
+                abs_diff(self[i], other[i]),
+                tol.absolute + tol.relative * scale,
+            );
+            if r > worst {
+                worst = r;
             }
         }
         worst
@@ -106,22 +144,11 @@ impl<const N: usize> Sample for [f32; N] {
         }
         out
     }
-
-    fn scale(self) -> f32 {
-        let mut worst = 0.0;
-        for &value in self.iter() {
-            let a = abs(value);
-            if a > worst {
-                worst = a;
-            }
-        }
-        worst
-    }
 }
 
-/// One IMU frame. A single vote covers all six axes: the worst axis decides
-/// disagreement, so a gyro or accelerometer fault cannot be hidden by the
-/// other axes.
+/// One IMU frame. A single vote covers all six axes: the worst normalized
+/// residual decides disagreement, so a gyro or accelerometer fault cannot be
+/// hidden by the other axes. Gyro axes are in rad/s, accel axes in m/s².
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImuSample {
     pub gyro: [f32; 3],
@@ -133,14 +160,36 @@ impl Sample for ImuSample {
         self.gyro.is_finite() && self.accel.is_finite()
     }
 
-    fn distance(self, other: Self) -> f32 {
-        let g = self.gyro.distance(other.gyro);
-        let a = self.accel.distance(other.accel);
-        if g > a {
-            g
-        } else {
-            a
+    fn separation(self, other: Self, tol: Tolerance) -> f32 {
+        let mut worst = 0.0;
+        for i in 0..3 {
+            let g_scale = if abs(self.gyro[i]) > abs(other.gyro[i]) {
+                abs(self.gyro[i])
+            } else {
+                abs(other.gyro[i])
+            };
+            let g = residual(
+                abs_diff(self.gyro[i], other.gyro[i]),
+                tol.gyro_absolute_rad_s + tol.gyro_relative * g_scale,
+            );
+            if g > worst {
+                worst = g;
+            }
+
+            let a_scale = if abs(self.accel[i]) > abs(other.accel[i]) {
+                abs(self.accel[i])
+            } else {
+                abs(other.accel[i])
+            };
+            let a = residual(
+                abs_diff(self.accel[i], other.accel[i]),
+                tol.accel_absolute_m_s2 + tol.accel_relative * a_scale,
+            );
+            if a > worst {
+                worst = a;
+            }
         }
+        worst
     }
 
     fn midpoint(self, other: Self) -> Self {
@@ -149,49 +198,74 @@ impl Sample for ImuSample {
             accel: self.accel.midpoint(other.accel),
         }
     }
+}
 
-    fn scale(self) -> f32 {
-        let g = self.gyro.scale();
-        let a = self.accel.scale();
-        if g > a {
-            g
-        } else {
-            a
+/// Fault thresholds for residual `|Δ| / (absolute + relative·scale) > 1`.
+/// The absolute part is in the measured quantity's unit; the relative part is
+/// dimensionless. Field names carry units where a physical channel is
+/// involved: rad/s for gyro, m/s² for accelerometer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tolerance {
+    /// Scalar/vector absolute threshold, in the sample's own unit (baro: m).
+    pub absolute: f32,
+    /// Scalar/vector relative threshold, dimensionless.
+    pub relative: f32,
+    /// Gyroscope absolute threshold in rad/s.
+    pub gyro_absolute_rad_s: f32,
+    /// Gyroscope relative threshold, dimensionless.
+    pub gyro_relative: f32,
+    /// Accelerometer absolute threshold in m/s².
+    pub accel_absolute_m_s2: f32,
+    /// Accelerometer relative threshold, dimensionless.
+    pub accel_relative: f32,
+}
+
+impl Tolerance {
+    /// Generic constructor for scalar or vector channels. For an
+    /// [`ImuSample`] it applies the same numeric threshold to both physical
+    /// channels, each in its *own* unit; this keeps older call sites valid but
+    /// the values are HEURISTIC. Prefer [`Tolerance::imu`] when two independent
+    /// channel thresholds are available.
+    pub const fn new(absolute: f32, relative: f32) -> Self {
+        let mut tol = Self::imu(absolute, relative, absolute, relative);
+        tol.absolute = absolute;
+        tol.relative = relative;
+        tol
+    }
+
+    /// Per-physical-channel constructor. Use this for [`ImuSample`] channels:
+    /// the gyro pair is in rad/s, the accel pair in m/s², and neither channel's
+    /// relative term is allowed to scale from the other channel's magnitude.
+    pub const fn imu(
+        gyro_absolute_rad_s: f32,
+        gyro_relative: f32,
+        accel_absolute_m_s2: f32,
+        accel_relative: f32,
+    ) -> Self {
+        Self {
+            absolute: 0.0,
+            relative: 0.0,
+            gyro_absolute_rad_s,
+            gyro_relative,
+            accel_absolute_m_s2,
+            accel_relative,
         }
     }
 }
 
-/// Maximum acceptable separation: `absolute + relative * larger_magnitude`.
-/// `absolute` must be positive at the caller's noise floor; `relative` must be
-/// non-negative.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Tolerance {
-    pub absolute: f32,
-    pub relative: f32,
-}
-
-impl Tolerance {
-    pub const fn new(absolute: f32, relative: f32) -> Self {
-        Self { absolute, relative }
-    }
-
-    fn limit(self, a: f32, b: f32) -> f32 {
-        let scale = if a > b { a } else { b };
-        self.absolute + self.relative * scale
-    }
-
-    fn exceeds<S: Sample>(self, a: S, b: S) -> bool {
-        a.distance(b) > self.limit(a.scale(), b.scale())
-    }
+fn exceeds<S: Sample>(tol: Tolerance, a: S, b: S) -> bool {
+    a.separation(b, tol) > 1.0
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     /// Identical readings in a row before a sensor may be quarantined.
+    /// HEURISTIC (F4): no noise-floor or flight datum fixes this count.
     pub stuck_samples: u8,
 }
 
 impl Config {
+    /// HEURISTIC deployment values; see `docs/MATH_VOTING.md`.
     pub const DEFAULT: Self = Self { stuck_samples: 8 };
 
     pub const fn new(stuck_samples: u8) -> Self {
@@ -224,8 +298,8 @@ impl<S> Vote<S> {
     }
 }
 
-/// Stateful voter. One instance per measured quantity (barometric height, each
-/// gyro/accel vector), reused every tick so stuck detection sees history.
+/// Stateful voter. One instance per measured quantity (barometric height, the
+/// IMU frame), reused every tick so stuck detection sees history.
 pub struct VotingChannel<S: Sample> {
     cfg: Config,
     tol: Tolerance,
@@ -290,7 +364,7 @@ impl<S: Sample> VotingChannel<S> {
                 None => unreachable!(),
             };
             let repeated = match self.last[i] {
-                Some(prev) => sample.distance(prev) == 0.0,
+                Some(prev) => sample.separation(prev, self.tol) == 0.0,
                 None => false,
             };
             if repeated {
@@ -308,7 +382,7 @@ impl<S: Sample> VotingChannel<S> {
                             Some(s) => s,
                             None => unreachable!(),
                         };
-                        if self.tol.exceeds(sample, peer) {
+                        if exceeds(self.tol, sample, peer) {
                             self.stuck[i] = true;
                         }
                         break;
@@ -334,22 +408,20 @@ impl<S: Sample> VotingChannel<S> {
         let mut worst_ratio = 0.0f32;
         let mut disagreement = false;
         let mut closest = (0usize, 1usize);
-        let mut closest_dist = f32::INFINITY;
+        let mut closest_ratio = f32::INFINITY;
         for a in 0..n {
             for b in (a + 1)..n {
                 let sa = samples[a].unwrap();
                 let sb = samples[b].unwrap();
-                let d = sa.distance(sb);
-                let limit = self.tol.limit(sa.scale(), sb.scale());
-                let ratio = if limit > 0.0 { d / limit } else { 0.0 };
-                if ratio > worst_ratio {
-                    worst_ratio = ratio;
+                let r = sa.separation(sb, self.tol);
+                if r > worst_ratio {
+                    worst_ratio = r;
                 }
-                if d > limit {
+                if r > 1.0 {
                     disagreement = true;
                 }
-                if d < closest_dist {
-                    closest_dist = d;
+                if r < closest_ratio {
+                    closest_ratio = r;
                     closest = (a, b);
                 }
             }
@@ -365,7 +437,9 @@ impl<S: Sample> VotingChannel<S> {
                     let mut sum = 0.0;
                     for b in 0..n {
                         if a != b {
-                            sum += samples[a].unwrap().distance(samples[b].unwrap());
+                            sum += samples[a]
+                                .unwrap()
+                                .separation(samples[b].unwrap(), self.tol);
                         }
                     }
                     if sum < best_sum {
@@ -380,18 +454,18 @@ impl<S: Sample> VotingChannel<S> {
         let mut outlier = None;
         if n == SENSOR_COUNT && disagreement {
             let third = SENSOR_COUNT - slots[closest.0] - slots[closest.1];
-            if self.tol.exceeds(readings[third].unwrap(), value) {
+            if exceeds(self.tol, readings[third].unwrap(), value) {
                 outlier = Some(third as u8);
             }
         }
 
         let base = match n {
-            1 => CONF_SINGLE,
-            2 => CONF_DUAL,
-            _ => CONF_TRIPLE,
+            1 => HEURISTIC_CONF_SINGLE,
+            2 => HEURISTIC_CONF_DUAL,
+            _ => HEURISTIC_CONF_TRIPLE,
         };
-        // Agreement within tolerance earns the full base confidence; severity
-        // is measured as overshoot beyond the threshold, not as ordinary noise.
+        // Agreement within tolerance earns the full HEURISTIC base confidence;
+        // severity is overshoot beyond the threshold, not ordinary noise.
         let overshoot = if worst_ratio > 1.0 {
             clamp01(worst_ratio - 1.0)
         } else {
@@ -399,7 +473,7 @@ impl<S: Sample> VotingChannel<S> {
         };
         Some(Vote {
             value,
-            confidence: base * (1.0 - DISAGREEMENT_PENALTY * overshoot),
+            confidence: base * (1.0 - HEURISTIC_DISAGREEMENT_PENALTY * overshoot),
             disagreement,
             stuck_mask: pack_bools(&self.stuck),
             used_mask: pack_slots(&slots, n),
