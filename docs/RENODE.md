@@ -10,6 +10,12 @@ schematic-bound `HwBoard::build_board()` placeholder; this smoke deliberately
 does not modify it. Passing this gate means "the control core boots and runs a
 bounded tick sequence on an emulated Cortex-M7 without a fault", nothing more.
 
+The working target part is `stm32h723zg` (single-bank 1 MiB flash, 128 KiB
+DTCM); the exact variant/package is `NOT VERIFIED` until the BOM is signed. The
+platform's `nvic.systickFrequency: 550_000_000` is the STM32H723 rated-clock
+assumption, **NOT VERIFIED** on hardware: the smoke never reads a real clock and
+no timing measurement is claimed here.
+
 ## Why the platform is not `stm32h743`
 
 Renode 1.17 has **no built-in `stm32h723` platform**. Checked in both the local

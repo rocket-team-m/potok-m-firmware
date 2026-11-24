@@ -13,7 +13,9 @@ procured-part datasheet value before using this budget to size a supply. The ari
 assumptions; the assumptions are not facts.
 
 **MCU correction (FW723-CLOCK).** The part is an **STM32H723**, not an
-STM32H743. Clock, voltage-scale, flash-latency and run-current assumptions in
+STM32H743; the working part assumption is `stm32h723zg` (single-bank 1 MiB
+flash, 128 KiB DTCM) and the exact variant/package is `NOT VERIFIED` until the
+BOM is signed. Clock, voltage-scale, flash-latency and run-current assumptions in
 this document were re-derived from the STM32H723 datasheet (ST DS13313) and
 reference manual (RM0468) as transcribed on 2026-11-24. They are *datasheet*
 facts at most; none was measured on the flight board. Values taken from a
