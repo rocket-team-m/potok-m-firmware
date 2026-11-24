@@ -25,8 +25,8 @@
 
 use potok_protocol::Phase;
 
-/// Verified thresholds. Rejects nonsensical values at construction instead of
-/// silently interpreting them as "never deploy" or "always deploy".
+/// Mission thresholds, derived as REQUIREMENTs in `docs/DEPLOYMENT_REQUIREMENTS.md`;
+/// none is a measured or standard value. Bad values are rejected loudly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeploymentConfig {
     /// Descent after a climb is only credible this high up.
