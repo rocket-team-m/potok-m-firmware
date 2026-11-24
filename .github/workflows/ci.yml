@@ -24,6 +24,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
-      # The rustup stable toolchain carries the thumb core; the runner's
-      # default cargo/rustc may not, which fails with E0463 (no `core`).
-      - run: rustup run stable cargo check --target thumbv7em-none-eabihf
+      # Pin RUSTC to the rustup stable rustc explicitly. `rustup run stable
+      # cargo` relies on PATH finding a rustup proxy; a system cargo/rustc
+      # (e.g. Arch's) ignores RUSTUP_TOOLCHAIN and lacks the thumb core,
+      # failing with E0463. See docs/TOOLCHAIN.md.
+      - run: RUSTC=$(rustup which rustc --toolchain stable) cargo check --target thumbv7em-none-eabihf
