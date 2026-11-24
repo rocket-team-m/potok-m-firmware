@@ -55,6 +55,17 @@ No `powf`, `exp`, `log`, `sqrtf` or other `libm` call is involved. All
 intermediate values stay near 1–4, so there is no overflow in the airdata
 range.
 
+The sqrt approximation's accuracy is **measured, not assumed**. Every whole
+pascal `dp = 1..=35 000` at `p = 101 325 Pa` was swept (35 000 points; `x`
+derived in f64 from the isentropic relation and rounded to f32) and
+`sqrt_approx(x)` compared with the correctly-rounded `f32::sqrt(x)`. Worst
+distance was **1 f32 ULP**, at `dp = 1 Pa` (`x = 1.4098854e-5`,
+`sqrt = 0.0037548442`); no point exceeded it. The old source comment saying
+"well below one ULP" was therefore too strong and is replaced by the
+measured bound. One ULP there is ~2e-7 in Mach, far below the gate's absolute
+tolerance. This is a representative sweep over the airdata span, not an
+exhaustive enumeration of all f32 bit patterns.
+
 A ratio at or above the M = 1 limit is a **counted, loud refusal**: the sampler
 returns `ShieldSample::UNAVAILABLE` (so the shield vetoes with `PitotInvalid`)
 and increments `UnavailableCounts::above_subsonic`. It never emits a clamped
@@ -76,10 +87,23 @@ M = 1 boundary: `q_c/p = 1.2^3.5 - 1 = 0.892929` (dp = 90 476 Pa at sea
 level). Above this the subsonic solver refuses; transonic/supersonic impact
 pressure obeys a different (normal-shock) relation that is not modeled here.
 
+## Pitot wire field: counted saturation, never a wrap
+
+`ShieldSample::pitot_dp` is an `i16` in Pa, so it cannot hold every valid
+subsonic reading — the M = 1 impact pressure at sea level is ~90 476 Pa.
+`ShieldSampler::derive` clamps dp to `i16::MAX` explicitly and returns a
+saturation flag; `ShieldSampler::sample` increments
+`UnavailableCounts::saturated` on each such tick. The Mach gate still uses
+the unclamped f32 dp, so saturation changes only the telemetry field, never
+the decision. The sample stays valid: it is not turned into `UNAVAILABLE`,
+and the clamp is visible in the counters rather than silent.
+
 ## Verification
 
 `firmware/tests/mach_math_tests.rs` pins the table, monotonicity in both
 pressures, zero/negative/non-finite refusal, bit-for-bit determinism, and the
-loud above-M = 1 refusal with its own counter. The same arithmetic is checked
-under `thumbv7em-none-eabihf` with `cargo check`; those are compile checks, not
-hardware measurements.
+loud above-M = 1 refusal with its own counter. `firmware/tests/shield_sample_tests.rs`
+pins dp-to-i16 saturation at and past `i16::MAX` with its `saturated` counter,
+and sweeps dp 1..=35 000 Pa to pin the measured 1-ULP sqrt bound. The same
+arithmetic is checked under `thumbv7em-none-eabihf` with `cargo check`; those
+are compile checks, not hardware measurements.

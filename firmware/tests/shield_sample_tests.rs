@@ -144,6 +144,56 @@ fn missing_driver_is_unavailable_with_a_counted_reason_never_a_healthy_zero() {
 }
 
 #[test]
+fn out_of_range_pitot_dp_saturates_the_wire_field_and_is_counted() {
+    let mut sampler = ShieldSampler::new();
+    let fast = Fixed {
+        dp: Some(40_000.0),
+        p: Some(101_325.0),
+    };
+    let sample = sampler.sample(&fast);
+
+    assert_eq!(
+        sample.pitot_dp,
+        i16::MAX,
+        "the wire field must saturate, never wrap negative"
+    );
+    assert_eq!(
+        sample.mach_est.to_bits(),
+        shield_sample::mach_from_pitot(40_000.0, 101_325.0)
+            .unwrap()
+            .to_bits(),
+        "the Mach gate must still see the unclamped pressure"
+    );
+    assert_eq!(
+        sampler.unavailable_counts(),
+        UnavailableCounts {
+            saturated: 1,
+            ..UnavailableCounts::default()
+        }
+    );
+
+    // Counting is cumulative; an in-range tick neither clears nor re-counts.
+    let _ = sampler.sample(&fast);
+    let _ = sampler.sample(&Fixed {
+        dp: Some(25_534.0),
+        p: Some(101_325.0),
+    });
+    assert_eq!(sampler.unavailable_counts().saturated, 2);
+    assert_eq!(sampler.unavailable_counts().non_positive, 0);
+}
+
+#[test]
+fn pitot_dp_at_the_i16_boundary_is_not_saturated() {
+    let mut sampler = ShieldSampler::new();
+    let sample = sampler.sample(&Fixed {
+        dp: Some(i16::MAX as f32),
+        p: Some(101_325.0),
+    });
+    assert_eq!(sample.pitot_dp, i16::MAX);
+    assert_eq!(sampler.unavailable_counts(), UnavailableCounts::default());
+}
+
+#[test]
 fn unavailable_feeds_the_shield_pitot_veto_with_a_counted_reason() {
     let mut sampler = ShieldSampler::new();
     let sample = sampler.sample(&NoAirdata);
@@ -162,6 +212,44 @@ fn unavailable_feeds_the_shield_pitot_veto_with_a_counted_reason() {
     reasons.note(decision.refusal);
     assert_eq!(reasons.pitot_invalid, 1);
     assert_eq!(reasons.accepted, 0);
+}
+
+/// F7: the seed + four Newton steps must agree with the correctly-rounded
+/// FPU sqrt over the whole airdata span, not just two operating points.
+/// Sweep every whole pascal 1..=35 000 at sea level and convert dp -> x with
+/// the isentropic relation in f64, sampling the x span the bisection can hand
+/// the helper (representative, not every f32 bit pattern). For positive f32,
+/// bit patterns are monotone in value, so their integer difference is the ULP
+/// distance.
+#[test]
+fn sqrt_approximation_ulp_error_over_airdata_range_is_measured() {
+    const P: f32 = 101_325.0;
+    let mut worst_ulp = 0u32;
+    let mut worst_dp = 0.0f32;
+    let mut worst_x = 0.0f32;
+    for dp_pa in 1..=35_000u32 {
+        let dp = dp_pa as f32;
+        let ratio = f64::from(dp) / f64::from(P);
+        let u = (1.0 + ratio).powf(2.0 / 7.0);
+        let x = ((u - 1.0) / 0.2) as f32;
+        let approx = shield_sample::sqrt_approx(x);
+        let reference = x.sqrt();
+        let ulp = approx.to_bits().abs_diff(reference.to_bits());
+        if ulp > worst_ulp {
+            worst_ulp = ulp;
+            worst_dp = dp;
+            worst_x = x;
+        }
+        assert!(approx.is_finite() && approx > 0.0, "dp={dp} x={x}");
+    }
+    println!(
+        "sqrt_approx worst = {worst_ulp} ULP at dp={worst_dp} Pa, x={worst_x}, ref={}",
+        worst_x.sqrt()
+    );
+    assert!(
+        worst_ulp <= 1,
+        "measured {worst_ulp} ULP over dp 1..=35000 Pa (worst dp={worst_dp}, x={worst_x})"
+    );
 }
 
 #[test]

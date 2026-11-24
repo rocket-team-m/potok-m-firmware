@@ -72,8 +72,9 @@ pub enum Unavailable {
     NonPositive,
 }
 
-/// Per-reason tally of unavailable samples. Never cleared, so telemetry can
-/// tell a missing driver from a bad sensor without a tracer.
+/// Per-reason tally of sampler outcomes. Never cleared, so telemetry can tell
+/// a missing driver from a bad sensor from a clamped wire field without a
+/// tracer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UnavailableCounts {
     pub no_driver: u32,
@@ -81,6 +82,9 @@ pub struct UnavailableCounts {
     pub non_positive: u32,
     /// Samples refused because `q_c/p` is outside the subsonic Pitot domain.
     pub above_subsonic: u32,
+    /// Valid samples whose dp exceeded the i16 wire field and were saturated
+    /// to `i16::MAX`. The Mach gate still used the unclamped reading.
+    pub saturated: u32,
 }
 
 impl UnavailableCounts {
@@ -94,6 +98,10 @@ impl UnavailableCounts {
 
     pub fn note_above_subsonic(&mut self) {
         self.above_subsonic += 1;
+    }
+
+    pub fn note_saturated(&mut self) {
+        self.saturated += 1;
     }
 }
 
@@ -111,6 +119,7 @@ impl ShieldSampler {
                 non_finite: 0,
                 non_positive: 0,
                 above_subsonic: 0,
+                saturated: 0,
             },
         }
     }
@@ -120,7 +129,12 @@ impl ShieldSampler {
     /// and the reason is counted here, never hidden as a healthy zero.
     pub fn sample<S: Airdata>(&mut self, source: &S) -> ShieldSample {
         match Self::derive(source) {
-            Ok(sample) => sample,
+            Ok((sample, saturated)) => {
+                if saturated {
+                    self.unavailable.note_saturated();
+                }
+                sample
+            }
             Err(DeriveError::Unavailable(reason)) => {
                 self.unavailable.note(reason);
                 ShieldSample::UNAVAILABLE
@@ -136,20 +150,37 @@ impl ShieldSampler {
         self.unavailable
     }
 
-    fn derive<S: Airdata>(source: &S) -> Result<ShieldSample, DeriveError> {
+    fn derive<S: Airdata>(source: &S) -> Result<(ShieldSample, bool), DeriveError> {
         let (Some(dp), Some(p)) = (source.pitot_dp_pa(), source.static_pa()) else {
             return Err(DeriveError::Unavailable(Unavailable::NoDriver));
         };
         match mach_from_pitot(dp, p) {
-            Ok(mach) => Ok(ShieldSample {
-                pitot_dp: dp as i16,
-                mach_est: mach,
-            }),
+            Ok(mach) => {
+                let (pitot_dp, saturated) = pitot_pa_to_i16(dp);
+                Ok((
+                    ShieldSample {
+                        pitot_dp,
+                        mach_est: mach,
+                    },
+                    saturated,
+                ))
+            }
             Err(MachError::NonFinite) => Err(DeriveError::Unavailable(Unavailable::NonFinite)),
             Err(MachError::NonPositive) => Err(DeriveError::Unavailable(Unavailable::NonPositive)),
             Err(MachError::AboveSubsonicLimit) => Err(DeriveError::AboveSubsonic),
         }
     }
+}
+
+/// Clamp a validated (finite, positive) dp into the i16 wire field and report
+/// whether it had to. The Mach gate keeps the f32 value; only the telemetry
+/// field is saturated, so a high-q reading cannot wrap into a negative (and
+/// therefore invalid) `pitot_dp` downstream.
+fn pitot_pa_to_i16(dp: f32) -> (i16, bool) {
+    let lo = i16::MIN as f32;
+    let hi = i16::MAX as f32;
+    let saturated = dp > hi || dp < lo;
+    (dp.clamp(lo, hi) as i16, saturated)
 }
 
 /// Internal split so an out-of-domain ratio gets its own counter without
@@ -227,8 +258,12 @@ pub fn mach_from_pitot(dp: f32, p: f32) -> Result<f32, MachError> {
 
 /// Bit-trick seed plus four Newton steps: deterministic and `libm`-free. The
 /// seed halves the exponent via `f32::from_bits((bits >> 1) + 0x1fc0_0000)`;
-/// four steps refine it well below one f32 ULP over the airdata range.
-fn sqrt_approx(x: f32) -> f32 {
+/// four steps refine it to **at most 1 f32 ULP** over dp 1..=35 000 Pa at sea
+/// level (measured, worst at dp = 1 Pa where x ~= 1.41e-5); the old "well
+/// below one ULP" wording was too strong. `shield_sample_tests` pins the
+/// bound against `f32::sqrt`; see `docs/MATH_AIRDATA.md`. Public only so that
+/// gate can call it directly.
+pub fn sqrt_approx(x: f32) -> f32 {
     let mut g = f32::from_bits((x.to_bits() >> 1) + 0x1fc0_0000);
     for _ in 0..4 {
         g = 0.5 * (g + x / g);
