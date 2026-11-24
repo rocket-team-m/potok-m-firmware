@@ -4,7 +4,7 @@
 
 # Поток-М / прошивка
 
-<span style="color:#a78bfa">STM32H743 · Embassy · no_std · Cortex-M7</span>
+<span style="color:#a78bfa">STM32H723 · Embassy · no_std · Cortex-M7</span>
 
 Контроллер, который решает. Машина, которая предлагает.
 
@@ -14,7 +14,7 @@
 
 ## <span style="color:#a78bfa">01</span> / Роль
 
-STM32H743 — главный. Он владеет фазой полёта, контуром стабилизации (PID),
+STM32H723 — главный. Он владеет фазой полёта, контуром стабилизации (PID),
 командами приводам и интерлоками. Raspberry Pi — советник: крутит модель и
 присылает поправки, Arduino-sized пакетом по UART. Прошивка решает, применять
 поправку или нет.
@@ -145,16 +145,21 @@ rustup target add thumbv7em-none-eabihf
 cargo test                        # хостовые тесты на моках, без железа
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo check --target thumbv7em-none-eabihf
-cargo build --release -p potok-m-firmware --target thumbv7em-none-eabihf
-probe-rs run --chip STM32H743ZI \
+RUSTC=$(rustup which rustc --toolchain stable) cargo check --target thumbv7em-none-eabihf
+RUSTC=$(rustup which rustc --toolchain stable) cargo build --release -p potok-m-firmware --target thumbv7em-none-eabihf
+probe-rs run --chip STM32H723ZGTx \
   target/thumbv7em-none-eabihf/release/potok-m-firmware
 ```
 
 `probe-rs` (раннер прописан в `.cargo/config.toml`) можно вызвать с
-`--erase-all` для чистой прошивки. Вариант чипа, `memory.x`
-(FLASH 2048K @ `0x08000000`, RAM 128K @ `0x20000000`) и такт time-driver'а
-(`TIM2`) должны быть сверены с BOM **до** первого включения.
+`--erase-all` для чистой прошивки. `memory.x` задаёт FLASH 1024K @ `0x08000000`
+и RAM (DTCM) 128K @ `0x20000000` — точные значения для STM32H723ZG из
+`stm32-metapac` v21.0.0 (`src/chips/stm32h723zg/metadata.rs`, семейство
+STM32H723/733 по DS12939). **NOT ASSIGNED:** точный вариант корпуса/флеша по
+BOM не подтверждён; `zg` (1 MB) — рабочее предположение, `ze` — тот же H723 с
+512 KB. Вариант чипа, `memory.x` и такт time-driver'а (`TIM2`) должны быть
+сверены с BOM **до** первого включения; название чипа в probe-rs проверить
+через `probe-rs chip list`.
 
 CI — три обязательных workflow на `ubuntu-latest`, все с toolchain
 `dtolnay/rust-toolchain@stable`:
@@ -174,7 +179,7 @@ CI — три обязательных workflow на `ubuntu-latest`, все с 
 cargo test --workspace
 cargo test --test safety --test watchguard_tests --test protocol_link_tests
 cargo test --test perf_tests --test scheduler_tests --test watchdog_tests --test timing_budget_tests
-cargo check --target thumbv7em-none-eabihf
+RUSTC=$(rustup which rustc --toolchain stable) cargo check --target thumbv7em-none-eabihf
 ```
 
 UART: 2 Мбит/с, 8N1, DMA в обе стороны, путь к Raspberry Pi; RX — два
@@ -249,8 +254,9 @@ SIL — фильтр регрессий, **не** лётная квалифик�
   `poll_phase_event`, `apply_command` возвращают безопасные заглушки:
   FSM остаётся в `BURN`, активной стабилизации нет. Ни одного выдуманного
   номера вывода.
-- **Вariant чипа и линкер — по BOM.** `stm32h743zi`, `time-driver-tim2`,
-  FLASH/RAM в `memory.x` — отправные точки, требующие подтверждения.
+- **Variant чипа и линкер — по BOM.** `stm32h723zg`, `time-driver-tim2`,
+  FLASH/RAM в `memory.x` — рабочие отправные точки (NOT ASSIGNED), требующие
+  подтверждения по BOM до первого включения.
 - **Железные тесты из плана не прогонялись:** логический анализатор на
   2 Мбит/с (длина кадров и время в бюджете 0.25 мс), час back-to-back без потерь,
   fault injection по магии/CRC/версии/seq, BURN-гейт с подключёнными серво,

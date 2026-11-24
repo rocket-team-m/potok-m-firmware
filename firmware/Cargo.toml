@@ -18,8 +18,10 @@ potok-protocol = { git = "https://github.com/rocket-team-m/potok-m-protocol.git"
 
 # Hardware-only dependencies. Host `cargo test` never sees them.
 [target.'cfg(target_os = "none")'.dependencies]
-# TODO(bom): confirm the exact STM32H743 variant from the schematic/BOM.
-embassy-stm32 = { version = "0.6.0", features = ["stm32h743zi", "time-driver-tim2", "exti"] }
+# NOT ASSIGNED: confirm the exact STM32H723 package/flash variant from the
+# schematic/BOM before the first flash. `zg` (1 MB FLASH) is an assumption;
+# `ze` is the same H723 line with 512 KB FLASH. See memory.x.
+embassy-stm32 = { version = "0.6.0", features = ["stm32h723zg", "time-driver-tim2", "exti"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
 embassy-time = "0.5.1"
 defmt = "1.0"

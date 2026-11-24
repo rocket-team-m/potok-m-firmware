@@ -1,10 +1,12 @@
-# План прошивки: STM32H743, Rust и Embassy
+# План прошивки: STM32H723, Rust и Embassy
 
 Прошивка STM32 переведена с C на Rust с Embassy. План зафиксирован здесь; код прошивки в этом документе не описывается.
 
 ## Цель и сборка
 
-- MCU: STM32H743, Cortex-M7. Target `thumbv7em-none-eabihf`.
+- MCU: STM32H723, Cortex-M7. Target `thumbv7em-none-eabihf`. Точный вариант
+  корпуса/флеша по BOM не подтверждён (NOT ASSIGNED): рабочее предположение
+  `stm32h723zg`, 1 MB FLASH; `ze` — тот же H723 с 512 KB (см. `memory.x`).
 - Embassy through `embassy-stm32`, with one hardware timer enabled as the time driver. `defmt` for logging over RTT, `probe-rs` for flash and debug.
 - `panic = "abort"` in the release profile. The panic handler logs and resets the MCU. No unwinding.
 - No allocator. If a dependency pulls in `alloc`, replace the dependency.

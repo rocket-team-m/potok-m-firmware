@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Potok-M STM32H743 firmware: host-testable safety and link logic.
+//! Potok-M STM32H723 firmware: host-testable safety and link logic.
 //!
 //! Hardware calls live behind the [`board::Board`] trait. The binary in
 //! `main.rs` is a thin adapter; `cargo test` runs the same code with mocks.
