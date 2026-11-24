@@ -2,10 +2,28 @@
 
 # HIL — typed bring-up matrix
 
-Hardware-in-the-loop verification for the STM32H743 controller. **This is a
-procedure to run on a real board, not a claim that it has been run.** Every
-result cell is blank; nothing is a pass by silence. No pin, rail, part or
-measurement in this document is asserted as present on a physical board.
+Hardware-in-the-loop verification for the STM32H723 controller (family
+correction from STM32H743; exact variant/package and every physical cell
+`NOT ASSIGNED` until `PIN_MATRIX.md` §5 is signed). **This is a procedure to run
+on a real board, not a claim that it has been run.** Every result cell is
+blank; nothing is a pass by silence. No pin, rail, part or measurement in this
+document is asserted as present on a physical board.
+
+**H723 correction (task FW723-PINS).** The MCU line is STM32H723, not
+STM32H743. H743 identifiers elsewhere (`README.md`, `firmware/Cargo.toml`
+`stm32h743zi`, `.cargo/config.toml` `STM32H743ZI`, `docs/RENODE.md`'s
+`stm32h743.repl`, `firmware/src/perf.rs:32` `CORE_HZ = 480_000_000`,
+`memory.x` FLASH 2048K, `docs/POWER_BUDGET.md` A6/L1) are H743-era and are
+**owner-lane items, not resolved here**. This document changes only the typed
+bring-up procedure; it asserts no H723 pin, rail or measurement.
+
+The owner's wiring block diagram is the BOM/interface source for the typed
+rows below
+(`/home/sehaxe/Downloads/5qWfXcTL-6tWOrtA-TiyO4iRbKyXnHvwpJ6E2ErQzmhOeHHmkUE3JOkdnEZg6Sugkj_in42w-5MGQiTDIiXvGwgk.jpg`).
+It shows interface labels (`PWM`, `UART`, `SPI`, `I2C`, `1W`, `АЦП`, `USB`,
+`QSPI`) and no pin number, AF, DMA stream, bus instance or chip select. Every
+physical cell stays `NOT ASSIGNED` until schematic-to-BOM reconciliation (BU12)
+and `PIN_MATRIX.md` §5 sign-off.
 
 Typed companions:
 
@@ -48,9 +66,11 @@ never downgraded to a note.
 |---|---|
 | Date / operator | |
 | Board serial / revision | |
+| H723 variant / package (from BOM) | |
 | Schematic revision | |
 | BOM revision | |
 | Firmware commit and profile (compat / lowlat) | |
+| H743-only tool identifiers reconciled (`stm32h743zi`, probe-rs chip, Renode platform) | |
 | Flashed image hash | |
 | Equipment (supply, DMM, logic analyser, scope, current probe) | |
 | Host gates green before session (`cargo test --workspace`, `cargo check --target thumbv7em-none-eabihf`) | |
@@ -63,7 +83,7 @@ budget and `PB §6` for the measurement steps.
 
 | ID | Gate | Type | Ref | Criterion | Result | Evidence / blocker |
 |---|---|---|---|---|---|---|
-| BU01 | Confirm chip variant, `memory.x` FLASH/RAM and time-driver timer against BOM **before** first power-on | precondition | README §5 | variant + layout + timer signed; the `STM32H743ZI` / TIM2 starting points are not approvals | | |
+| BU01 | Confirm **STM32H723** exact variant/package, `memory.x` FLASH/RAM and time-driver timer against BOM **before** first power-on | precondition | PIN §1A/§1B, README §5 | H723 variant + package + map signed (FLASH ≤ 1 MB; 2048K is an H743 value); `stm32h743zi` / `STM32H743ZI` / TIM2 starting points are not approvals | | |
 | BU02 | Unpowered rail short and back-feed check | electrical | PB §6 step 1 | no near-zero path; no UART/USB back-feed | | |
 | BU03 | Supply voltage and current limit recorded before connecting | electrical | PB §6 step 2 | both values recorded; stop if either `NOT ASSIGNED` | | |
 | BU04 | Each rail measured at its schematic test point | electrical | PB §6 steps 3–4 | voltage and current recorded per rail | | |
@@ -74,6 +94,27 @@ budget and `PB §6` for the measurement steps.
 | BU09 | Cold flash with `probe-rs` from fully unpowered board | electrical | PB §6 step 11 | boot succeeds; image hash matches §1 | | |
 | BU10 | Pin map complete and signed | precondition | PIN §5 | every physical cell `ASSIGNED` with schematic ref | | `BLOCKED` |
 | BU11 | `TODO(schematic)` / `TODO(bom)` replaced in `main.rs`, `memory.x`, `firmware/Cargo.toml` | code | README `[07]` | no target-path `todo!()` remains | | `BLOCKED` |
+| BU12 | **Schematic-to-BOM reconciliation from the owner wiring diagram before any pin assignment** | precondition | PIN §1 items 6–9, §1C, C13; owner diagram path in header | signed list resolves ICM-42688-P/MS5611 absence, two KX134-1211, H3LIS331DL, two MMC5983MA, two LPS22HH, thermometer, photoresistors, GPS, USB/power, video pair, recovery servos 1–2 and the SPI/I²C/1-Wire/ADC/QSPI/UART label conflicts; no pin assigned before this closes | | `BLOCKED` |
+
+## 2A. H723 bring-up order (power → clock → SWD → UART → sensors → servo outputs)
+
+Execute strictly in this order; a later stage is `BLOCKED` until its
+prerequisite is signed or measured. This is a procedure, not a run record:
+every Result cell is blank. `PIN §n` and `PB §n` name the companion documents.
+
+| Order | Stage | Prerequisite | Ref | Criterion before advancing | Result | Evidence / blocker |
+|---:|---|---|---|---|---|---|
+| 0 | Variant/tooling precondition | BOM + schematic signed for the exact H723 variant/package | PIN §1A/§1B/§1C, BU01, BU10–BU12 | H723 part and package identified; H743-only identifiers (`stm32h743zi`, `STM32H743ZI`, `stm32h743.repl`, `CORE_HZ`) reconciled in their owner lanes; **BU12 diagram-to-BOM reconciliation closed**; no §3 cell filled by assumption | | `BLOCKED` |
+| 1 | Power | Order 0 | BU02–BU05, BU07, BU08; PB §6 steps 1–4, 7–9 | unpowered shorts/back-feed clear; supply V/I limits and R1–R4 voltages recorded; ripple/sag, inrush and brownout recorded; stop on any `FAIL` | | |
+| 2 | Clock | Order 1 | BU01; PB §6 step 9; `perf.rs:32` | oscillator/PLL source and target system clock from the schematic measured; time-driver timer (TIM2 starting point only) and the 500 Hz tick verified; H743 480 MHz cycle-budget assumption flagged, not reused | | `BLOCKED` — clock source `NOT ASSIGNED` |
+| 3 | SWD | Orders 1–2 | BU09, BU10, BU11; PB §6 step 11 | debug header pinout from schematic; probe attached with an H723 chip target (never `STM32H743ZI`); cold flash boots; image hash matches §1 | | `BLOCKED` — SWD header `NOT ASSIGNED` |
+| 4 | UART | Order 3 + Rx/Tx implemented | PIN §3 P01–P04, C01/C06; §5 U01–U08 | USART instance/pins/AF and two distinct DMA slots signed; 2 Mbit/s 8N1 loopback and wire time recorded; double-buffer swap and fault injection measured | | `BLOCKED` |
+| 5 | Sensors | Order 4 + bus drivers | PIN §3 P11–P27; §4 S01–S08 | SPI/I²C bus pins and CS/straps signed; continuity, health bits and redundant vote recorded; ADC front-end measured; no sensor part assumed from the H743 BOM | | `BLOCKED` |
+| 6 | Servo outputs | Orders 1–5 + PWM driver + pin map signed | PIN §3 P07–P09, C03; §7 G01–G05; PB §6 step 6 | timer channels/AF per servo signed; 6 servos ↔ 2 axes mapping decided; stall current measured; BURN gate proven with servos connected and no AI actuation | | `BLOCKED` |
+
+After order 6: run §6 (watchdog), §8 (deployment), §9 (buzzer/search), then
+the §10 flight-ready gates. Do not start a later stage to "unblock" an earlier
+one.
 
 ## 3. Pin map (summary — full matrix in PIN_MATRIX.md)
 
@@ -85,18 +126,30 @@ value, and only after `PIN_MATRIX.md` §5 is signed.
 | USART TX (`hw::Tx::send`) | `UART_TX` | B01 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `STUB` |
 | USART RX slot A (`hw::Rx::take`) | `UART_RX` | B01 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `STUB` |
 | USART RX slot B | `UART_RX` | B01 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `STUB` |
-| Time driver (TIM2 starting point) | `PERIPHERAL` | B01 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` |
-| IWDG1 (`setup_iwdg`) | `PERIPHERAL` | B01 | — | — | — | `NOT ASSIGNED` | `PERIPHERAL`, no pin |
+| Time driver (TIM2 — H743-era starting point) | `PERIPHERAL` | B01 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — H723 timer instance `NOT ASSIGNED` |
+| IWDG (`setup_iwdg(p.IWDG1)` starting point) | `PERIPHERAL` | B01 | — | — | — | `NOT ASSIGNED` | `PERIPHERAL`, no pin; instance `NOT ASSIGNED` |
 | Servo PWM pitch / yaw | `TIM_PWM` | B10 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `STUB` |
 | Servo 3..6 (BOM only) | `TIM_PWM` | B10 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no code role |
 | `MOTOR_ARMED` sense | `GPIO_IN` | `NOT ASSIGNED` | `NOT ASSIGNED` | — | — | `NOT ASSIGNED` | `STUB` |
 | Phase-event sources | `GPIO_IN` | B02–B05 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `STUB` |
 | `sensor_flags` IMU/baro/mag/pitot | `GPIO_IN` | B02–B07 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `STUB`; pitot part unknown |
-| Sensor buses (7 parts) + flash + radio | `SPI_*`/`I2C_*` | B02–B09 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no drivers |
+| Sensor buses — SPI set (H3LIS331DL, LIS2MDL, LPS22HH ×2, LSM6DSR, MMC5983MA ×2) | `SPI_*` | B03, B05–B07, B12, B15 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no drivers; CS unknown |
+| Sensor buses — KX134-1211 ±8 g/±16 g | `I2C_*` | B04 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — addresses unknown |
+| Thermometer / photoresistors | `ONE_WIRE` / `ADC_IN` | B14 / B13 | `NOT ASSIGNED` | — | — | `NOT ASSIGNED` | `BLOCKED` — no drivers; no 1-Wire peripheral |
+| QSPI flash W25Q512 512 Mbit / 64 MB | `QSPI_*` | B09 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — OCTOSPI instance unknown |
+| LoRa 1262F30-T UART + GPS UART | `UART_TX`/`UART_RX` | B08 / B16 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no drivers; was SPI in old BOM |
+| USB port / battery + toggle | `USB` / `GPIO_IN` | B18 | `NOT ASSIGNED` | `NOT ASSIGNED` | — | `NOT ASSIGNED` | `BLOCKED` — rails/test points unknown |
+| Video camera + flash | `OFF_MCU` | B17 | `NOT ASSIGNED` | — | — | `NOT ASSIGNED` | `BLOCKED` — no MCU interface drawn |
+| Recovery servos 1–2 | `TIM_PWM` | B10/B11 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — conflicts with pyro/spring B11 |
 | Buzzer PWM | `SCHEDULER` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `SCHEDULER` |
 | Search radio control | `SCHEDULER` | B08 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `SCHEDULER` — no driver |
 | Deployment spring A / B | `GPIO_OUT` | B11 | `NOT ASSIGNED` | — | — | `NOT ASSIGNED` | `SCHEDULER` |
 | Deployment arm A / B | `GPIO_IN` | `NOT ASSIGNED` | `NOT ASSIGNED` | — | — | `NOT ASSIGNED` | `SCHEDULER` |
+
+B01 is STM32H723 (family) with exact variant/package `NOT ASSIGNED`. No
+H743-only peripheral (PIN §1B: FMC/SDRAM, JPEG, H743 Quad-SPI, 3×16-bit ADC)
+is assumed available here. Wiring-derived rows come from the owner diagram and
+are gated on BU12; they carry no pin, bus instance, CS or address.
 
 ## 4. Sensor continuity and health
 
@@ -113,6 +166,7 @@ BOM devices behind `Accel` are not uniquely mapped (PIN_MATRIX.md §1 row B04).
 | S06 | Withdraw one sensor at a time | electrical | vote degrades with a reported reason, never a silent substitute | | `BLOCKED` |
 | S07 | Move a sensor while stationary | electrical | no false stuck/quarantine verdict | | `BLOCKED` |
 | S08 | Calibration-table CRCs and golden config CRC on flashed image | self-test | `self_test::GOLDEN_CONFIG_CRC = 0xABF7` verified on target, not only host | | |
+| S09 | Diagram sensor-set continuity: SPI set, KX134-1211 ×2 I²C, thermometer 1-Wire, photoresistor ADC | electrical | each drawn link recorded at its connector; CS/address/arbitration still `NOT ASSIGNED` until schematic; a common drawn line is not proof of one selected bus (PIN C10/C11) | | `BLOCKED` — no drivers/bus map |
 
 ## 5. UART loopback and wire timing
 
@@ -129,6 +183,7 @@ flashed. Until then every row is `BLOCKED`.
 | U06 | Back-to-back frames ≥ 1 hour at full rate | wire | including idle-line gaps and Pi jitter: **zero** byte loss | | `BLOCKED` |
 | U07 | Unplug UART / kill the Pi | safety | zero command, stale detection, watchdog behaviour per §6 | | `BLOCKED` |
 | U08 | Counter readback | telemetry | measured counter values cross-checked with `defmt`/telemetry; a counter that cannot be read back is not evidence | | `BLOCKED` |
+| U09 | LoRa 1262F30-T (915 MHz SMA) and GPS module UART links from the diagram | wire | each USART instance/pins/AF and DMA (if any) signed before loopback; record that the working BOM called LoRa SPI and was reconciled (BU12/PIN item 7) | | `BLOCKED` — no drivers |
 
 ## 6. Watchdog
 
@@ -202,7 +257,9 @@ qualification).
 | F10 | Preflight self-test 6/6 with real board inputs at boot | self-test | | |
 | F11 | Deployment thresholds and separation `Plan` values signed by the owner | precondition | | |
 | F12 | Open items listed with owners; none marked "will fix in flight" | evidence | | |
-| F13 | BOM reconciliation closed (PIN §1 items 1–4) | precondition | | |
+| F13 | BOM reconciliation closed (PIN §1 items 1–5) | precondition | | |
+| F14 | H723 variant/package and toolchain identifiers signed; no H743-only peripheral or identifier carried forward (PIN §1A/§1B, §2A order 0) | precondition | | `BLOCKED` |
+| F15 | Schematic-to-BOM reconciliation closed from the owner wiring diagram **before** any pin assignment (BU12, PIN §1 items 6–9, C13) | precondition | | `BLOCKED` |
 
 ## 11. What SIL cannot prove
 
@@ -219,8 +276,41 @@ logic, not the board. Each row is a scope boundary, not a claim about hardware.
 | X06 | Dead Pi / unplugged UART yielding zero actuation with servos connected | §5 U07, §6 W05, §7 | `BLOCKED` |
 | X07 | Pyro/deployment continuity, independent arm channels, one-shot release reaching both outputs | §8 | `NOT RUN` |
 | X08 | Buzzer acoustics, PWM pin assignment, radio duty on the air, battery-band behaviour with a real pack | §9 | `BLOCKED` |
-| X09 | Chip variant and `memory.x` correctness, cold flash, EMC, interrupt latency, RAM/flash headroom on target | §2 BU01/BU09 | `NOT RUN` |
+| X09 | H723 variant and `memory.x` correctness (FLASH ≤ 1 MB), clock source, cold flash, EMC, interrupt latency, RAM/flash headroom on target | §2 BU01/BU09, §2A orders 1–3 | `NOT RUN` |
+| X10 | Wiring-derived interfaces: QSPI flash, LoRa/GPS UART, SPI/I²C/1-Wire/ADC sensor links, USB, recovery vs control PWM, video subsystem | §2 BU12, §3, §4 S09, §5 U09 | `BLOCKED` |
 
 A green `sil` job is necessary before a board session and is **not sufficient**
 to call the firmware flight-qualified. HIL on the real board is the final
 verification, and this document records none of it yet.
+
+## 12. Peripheral resource-collision check (FW723-IO)
+
+**Procedure, not a run record.** Every Result cell is blank; nothing is a pass
+by silence. This section checks that the *chosen* timers, PWM channels, DMA
+streams, bus chip-selects and UART instances do not collide. The demand and
+family availability are in [RESOURCE_MAP.md](RESOURCE_MAP.md) §§2–6; every
+physical value there is `NOT ASSIGNED` until `PIN_MATRIX.md` §5 is signed. The
+result vocabulary is §0 above; `BLOCKED` is the correct entry while the
+schematic is unresolved.
+
+Prerequisite for the whole table: RESOURCE_MAP D01–D13 closed against the signed
+netlist and procured H723 variant/package. Without that, R02 and R03 cannot be
+answered by reading code or by asserting in a host test.
+
+| ID | Check | Type | Ref | Criterion | Result | Evidence / blocker |
+|---|---|---|---|---|---|---|
+| R01 | Exact H723 variant/package, bonded timer/DMA/SPI/USART inventory and GPIO count signed | precondition | RESOURCE_MAP D01, D13; PIN §1A/§1B, BU01, BU10 | variant and package in the §1 session record; no H743-only peripheral or identifier used to fill a cell | | `BLOCKED` — variant/package `NOT ASSIGNED` |
+| R02 | **Timer/PWM collision:** every role owns a distinct `(timer instance, channel)` pair | static + on-target | RESOURCE_MAP §4, D10; PIN §3 P05, P07–P09, P28 | from the signed board-adapter resource table: time driver, 6 servos, 1W thermometer, buzzer/search and any camera trigger have no duplicated pair; the time-driver timer's base settings are compatible with any timer it shares; scope shows **6 independent** servo waveforms at the configured rate | | `BLOCKED` — timer/channel/AF `NOT ASSIGNED`; servos 3–6 untagged |
+| R03 | **DMA collision:** every role owns a distinct `(DMA controller, stream/channel, DMAMUX request)` triple | static + on-target | RESOURCE_MAP §4, D12; PIN §4 C01/C06, §5 U01–U03 | no two roles share a stream; Pi RX slot A ≠ slot B; no sensor/flash bus stream aliases UART TX/RX; DMA1/DMA2/BDMA/MDMA domains named per role; logic analyser shows both RX slots swapping and no byte loss under full sensor + flash load | | `BLOCKED` — no signed DMA map |
+| R04 | SPI chip-select and I²C address uniqueness | static + wire | RESOURCE_MAP D02, D08, D09; PIN §4 C02; §5 S01 | ≥9 independent CS nets (8 sensors + flash), one CS per device; the two MMC5983MA parts have distinct CS or I²C straps; no two devices assert MISO together; continuity measured per CS | | `BLOCKED` — bus topology `NOT ASSIGNED` |
+| R05 | UART/USB instance separation | static + wire | RESOURCE_MAP D05–D07; PIN §3 P01–P04 | LoRa, GPS and Pi are three distinct instances with distinct pins/AF; Pi RX/TX DMA per R03; baud and direction recorded per module; if Pi is on USB, OTG role and `USB ПОРТ` sharing decided | | `BLOCKED` — instances and link choice `NOT ASSIGNED` |
+| R06 | W25Q512 bus choice and contention | static + on-target | RESOURCE_MAP D03, D14; PIN §1B, P23 | SPI vs OCTOSPI signed; flash streams distinct from sensors and UART (R03); worst-case erase/write burst measured against the 500 Hz loop and the Pi link with zero missed control cycles | | `BLOCKED` — bus and stream `NOT ASSIGNED` |
+| R07 | Video subsystem resource | precondition | RESOURCE_MAP D04 | camera + video flash endpoint identified: if off-MCU, record reason and mark `N/A`; if on MCU, its SPI instance, CS, streams and measured bandwidth are recorded and it does not share the sensor bus without a measured budget | | `BLOCKED` — no MCU path drawn in the diagram |
+| R08 | 1W thermometer and photoresistor resource | static + wire | RESOURCE_MAP D11; PIN §3 P26/P27 | chosen 1W mechanism (timer capture / UART / GPIO) does not duplicate an R02 channel; photoresistor ADC channels distinct from battery/temperature; front-end measured | | `BLOCKED` — mechanism `NOT ASSIGNED` |
+| R09 | GPIO budget after CS/strap/control assignment | static | RESOURCE_MAP §4; PIN §1A | total assigned GPIO ≤ bonded count for the procured package; every output has one owner and every input one source | | `BLOCKED` — package `NOT ASSIGNED` |
+| R10 | Runtime assertion of the authored resource table | code→target | R02–R04, R06 | the board adapter exposes one resource table and rejects duplicate `(timer, channel)` and `(DMA controller, stream)` pairs at startup (compile-time or first-boot check); a deliberate duplicate injected in a test image is rejected; the flashed image hash in §1 matches the checked table | | `BLOCKED` — no board adapter / resource table exists |
+
+R02 and R03 are the hard gates: a signed schematic that assigns two roles to
+one channel or one DMA stream is a `FAIL`, not a note, and the session stops
+before any power-on stage of §2A. Passing R01–R10 is a precondition for §2A
+orders 4–6 (UART, sensors, servo outputs), not a substitute for them.
