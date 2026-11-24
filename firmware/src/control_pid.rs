@@ -21,6 +21,33 @@
 //! Output is in the same raw units as [`Command`]: 0.001 rad per count, bounded
 //! by [`MAX_CORRECTION_RAW`]. [`command_from_raw`] is the only bridge to the
 //! existing control type; this module has no pins, sensors or actuators.
+//!
+//! ## Source trace
+//!
+//! Equation numbers are from Åström & Hägglund, **AH95** =
+//! *PID Controllers: Theory, Design, and Tuning*, 2nd ed., ISA 1995
+//! (ISBN 978-1-556-17516-9), and **AH06** = *Advanced PID Control*, ISA 2006
+//! (ISBN 978-1-556-17942-6). AH95 Ch. 3 prints a complete computer program
+//! for exactly this discrete algorithm; AH06 Ch. 13 prints the difference
+//! equations with numbers.
+//!
+//! | This code | Source | Sign and per-step scaling |
+//! |---|---|---|
+//! | `error = r - y` | AH95 Eq. (3.9), AH06 Eq. (3.1) | `e = ysp - y`; positive error drives positive output |
+//! | `p = kp * error` | AH95 Eqs. (3.19)-(3.20) / AH06 Eqs. (3.17)-(3.18) with `b = 1`, discrete AH06 Eq. (13.5) | no approximation needed |
+//! | `d = -kd_dt * LPF(Δy)` | AH95 Eq. (3.22) and AH95 computer code, AH06 Eq. (3.14), discrete AH06 Eq. (13.13) | `c = 0`: derivative acts on **measurement**, negative sign; `kd_dt = K·Td/h`, `alpha = Td/(Td+N·h)`, giving `bd = kd_dt·(1-alpha) = K·Td·N/(Td+N·h)` |
+//! | `integral += ki_dt * error` | AH95 computer code `bi = K·h/Ti`, AH06 Eq. (13.7) | forward Euler; `ki_dt = (K/Ti)·h` |
+//! | integral stored as output contribution | AH06 §13.5 / Eq. (13.25) | bumpless parameter changes: the state is `∫(K/Ti)e dt`, not `∫e dt` |
+//! | freeze while saturated | AH95 §3.5 "Conditional Integration", AH06 §3.5, IFAC PID'24 §3.7 | integrate only when the update does not push further into saturation |
+//! | setpoint preload | AH06 Eq. (13.25), IFAC PID'24 §3.6 "Bumpless transfer" | hold `P+I+D` continuous: `I <- u_prev - P - D` |
+//! | `out_limit` clamp + flag | AH95 computer code `u = sat(v, ulow, uhigh)`, AH06 Eq. (13.23) | symmetric saturation in output raw counts |
+//!
+//! Firmware choices, not book equations: `b = 1` and `c = 0` (AH06 Eqs.
+//! (3.18)-(3.19) instantiated); conditional integration instead of the book's
+//! back-calculation (both are AH06 §3.5 methods); the separate `i_limit`;
+//! backward-Euler derivative filter (AH06 Eq. (13.13), rather than the Tustin
+//! `ad` in the AH95 program); and Q16.16 round-half-away-from-zero.
+//! `docs/MATH_PID.md` has the full derivation and the closed-form gates.
 
 use crate::{Command, MAX_CORRECTION_RAW};
 
@@ -148,25 +175,33 @@ impl PidNum for Fx {
 
 /// Gains are **per step**, not per second: `ki_dt = Ki * dt`, `kd_dt = Kd / dt`.
 /// Keeping them pre-scaled means [`Pid::update`] needs no division.
+/// With AH95/AH06 notation `Ki = K/Ti` and `Kd = K*Td`, so `ki_dt` is the book's
+/// `bi = K*h/Ti` (AH06 Eq. 13.7) and `kd_dt` is `K*Td/h` (AH06 Eq. 13.13).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PidConfig<T> {
-    /// Output raw counts per raw count of error.
+    /// Output raw counts per raw count of error: AH95/AH06 `K`, b = 1.
     pub kp: T,
-    /// Integral increment per step per raw count of error.
+    /// Integral increment per step per raw count of error: AH95 `bi`, AH06 Eq. (13.7).
     pub ki_dt: T,
-    /// Output raw counts per raw count of measurement change in one step.
+    /// Output raw counts per raw count of measurement change in one step:
+    /// AH95/AH06 `K*Td/h`; the `bd` of AH06 Eq. (13.13) is `kd_dt*(1-deriv_alpha)`.
     pub kd_dt: T,
-    /// Output saturation, in raw counts (positive).
+    /// Output saturation, in raw counts (positive): AH95 `sat(v, ulow, uhigh)`.
     pub out_limit: T,
     /// Max integral contribution, in output raw counts (non-negative).
+    /// Firmware choice; AH95/AH06 use actuator saturation, not a second I clamp.
     pub i_limit: T,
     /// Derivative low-pass coefficient in `(0, 1]`; `1` disables filtering.
+    /// AH06 Eq. (13.13) writes this as `Td/(Td + N*h)`; N is the derivative
+    /// gain limit of AH06 Eq. (3.14).
     pub deriv_alpha: T,
 }
 
 impl PidConfig<f32> {
     /// Convert continuous gains (per second) at a fixed tick period to the
-    /// per-step form the controller consumes.
+    /// per-step form the controller consumes. `ki` is `K/Ti` and `kd` is `K*Td`
+    /// in AH95/AH06 notation; `deriv_alpha` is the caller's precomputed
+    /// `Td/(Td + N*h)` or `1` for an unfiltered derivative.
     pub fn from_si(
         kp: f32,
         ki: f32,
@@ -241,6 +276,10 @@ impl<T: PidNum> Pid<T> {
 
     /// Advance one tick and return the saturated command in raw units.
     pub fn update(&mut self, setpoint: T, measurement: T) -> T {
+        // AH06 Eq. (13.13) backward-Euler filtered derivative on measurement:
+        // D_k = alpha*D_{k-1} - kd_dt*(1-alpha)*(y_k - y_{k-1}). Filtering the
+        // increment first and scaling after is the same linear recursion, with
+        // alpha = Td/(Td+N*h). No setpoint enters here (c = 0, AH06 Eq. 3.19).
         let delta = measurement.sub(self.prev_measurement);
         self.prev_measurement = measurement;
         self.filtered_delta = self
@@ -248,19 +287,24 @@ impl<T: PidNum> Pid<T> {
             .add(self.cfg.deriv_alpha.mul(delta.sub(self.filtered_delta)));
         let d = self.cfg.kd_dt.mul(self.filtered_delta).neg();
 
+        // AH06 Eq. (3.1): e = ysp - y, positive error -> positive output.
         let error = setpoint.sub(measurement);
+        // AH06 Eq. (13.5), setpoint weight b = 1.
         let p = self.cfg.kp.mul(error);
         let limit = self.cfg.out_limit;
         let neg_limit = limit.neg();
         let i_hi = self.cfg.i_limit;
         let i_lo = i_hi.neg();
 
-        // Bumpless setpoint: reload the integrator to hold the last output
-        // and skip this tick's integration, so the output does not jump.
+        // Bumpless transfer, AH06 Eq. (13.25) / IFAC PID'24 §3.6: choose the
+        // integrator so P+I+D equals the previous (already saturated) output,
+        // and skip this tick's integration. AH06 §13.5 stores I as the output
+        // contribution, so changing K or the setpoint needs no extra scaling.
         let preloaded = self.primed && setpoint != self.prev_setpoint;
         let i_next = if preloaded {
             last_hold(self.last_output, p, d).clamped(i_lo, i_hi)
         } else {
+            // AH06 Eq. (13.7) forward Euler, then the firmware's i_limit clamp.
             self.integral
                 .add(self.cfg.ki_dt.mul(error))
                 .clamped(i_lo, i_hi)
@@ -270,7 +314,9 @@ impl<T: PidNum> Pid<T> {
         let output = unsat.clamped(neg_limit, limit);
         self.saturated = unsat > limit || unsat < neg_limit;
 
-        // Clamping anti-windup: saturated and pushing further out -> freeze.
+        // Conditional integration (AH95 §3.5, AH06 §3.5): freeze only when
+        // saturated AND the update would make the saturation worse; a reversal
+        // unwinds on the next tick.
         let freeze = self.saturated
             && ((unsat > limit && i_next > self.integral)
                 || (unsat < neg_limit && i_next < self.integral));
