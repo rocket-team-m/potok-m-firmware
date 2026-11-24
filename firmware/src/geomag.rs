@@ -32,9 +32,9 @@ const WGS84_B: f64 = 6356.7523142;
 /// Geomagnetic reference radius used by WMM, km.
 const GEOMAG_RE: f64 = 6371.2;
 
-const PI: f64 = 3.14159265358979323846264338327950288;
-const TAU: f64 = 6.28318530717958647692528676655900576;
-const FRAC_1_TAU: f64 = 0.15915494309189533576888376337251436;
+const PI: f64 = core::f64::consts::PI;
+const TAU: f64 = core::f64::consts::TAU;
+const FRAC_1_TAU: f64 = 1.0 / TAU;
 
 /// Gauss coefficients g_n^m (nT), flattened at `n*(n+1)/2 + m`; index 0 unused.
 pub const G: [f64; 91] = [
@@ -213,13 +213,13 @@ fn synthesize(loc: Location, year: f64) -> Field {
     let mut bx = 0.0f64;
     let mut by = 0.0f64;
     let mut bz = 0.0f64;
-    for n in 1..=MAX_DEGREE {
+    for (n, &rrp_n) in rrp.iter().enumerate().take(MAX_DEGREE + 1).skip(1) {
         for m in 0..=n {
             let i = n * (n + 1) / 2 + m;
             let gh = g[i] * cos_m[m] + h[i] * sin_m[m];
-            bz -= rrp[n] * gh * (n + 1) as f64 * pcup[i];
-            by += rrp[n] * (g[i] * sin_m[m] - h[i] * cos_m[m]) * m as f64 * pcup[i];
-            bx -= rrp[n] * gh * dpcup[i];
+            bz -= rrp_n * gh * (n + 1) as f64 * pcup[i];
+            by += rrp_n * (g[i] * sin_m[m] - h[i] * cos_m[m]) * m as f64 * pcup[i];
+            bx -= rrp_n * gh * dpcup[i];
         }
     }
 
