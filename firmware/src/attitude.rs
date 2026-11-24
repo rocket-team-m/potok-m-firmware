@@ -1,19 +1,47 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Lightweight Mahony-style SO(3) complementary filter for the flight loop.
+//! Fixed-point explicit complementary filter on SO(3), after
+//! Mahony, Hamel & Pflimlin, *Nonlinear Complementary Filters on the Special
+//! Orthogonal Group*, IEEE TAC 53(5), 2008, DOI 10.1109/TAC.2008.923738
+//! (author manuscript HAL hal-00488376v1). Equation numbers below refer to
+//! that paper; appendix numbers are given where the manuscript states the
+//! same result in quaternion form.
 //!
 //! The filter fuses a body-frame gyroscope with gravity (accelerometer) and
 //! optional north (magnetometer) reference directions. It carries a unit
-//! quaternion, a gyro-bias estimate and configurable gains. All arithmetic is
-//! integer fixed point: no floats, no `libm`, no allocation, so the same source
-//! builds for `thumbv7em-none-eabihf` and for host tests.
+//! quaternion, an online gyro-bias estimate and positive gains. All arithmetic
+//! is integer fixed point: no floats, no `libm`, no allocation, so the same
+//! source builds for `thumbv7em-none-eabihf` and for host tests.
 //!
-//! Conventions (state these once; the firmware uses z-up world / NED-free body):
-//! - [`Quat`] is Hamilton scalar-first and rotates body vectors into world.
-//! - Accelerometer input is specific force, i.e. "up" in body frame at rest.
-//! - Magnetometer input is "north" in body frame; world north is +x.
-//! - Gyro input is body angular rate in rad/s.
-//! - The correction error is `measured × estimated`, which drives the
-//!   quaternion toward the measurement under the update below.
+//! Conventions and the equations they implement (z-up world, NED-free body):
+//! - [`Quat`] is Hamilton scalar-first and rotates body vectors into world;
+//!   `R(q)` is that body-to-world rotation. `q̇ = ½ q ⊗ p(Ω)` for a body-frame
+//!   rate `Ω` is Eq. 45 (Eq. 48b in the quaternion appendix).
+//! - World up is +e3 and world north is +e1. The accelerometer input is
+//!   specific force, i.e. "up" in body frame at rest: `v_a = a/|a| ≈ Rᵀe3`.
+//!   The paper writes `v_a ≈ −Rᵀe3` (Eq. 29) because its inertial e3 points
+//!   down along gravity; that is the same physical vector under the opposite
+//!   world-axis label.
+//! - `v̂_a = R̂ᵀe3` and `v̂_n = R̂ᵀe1` are the estimated body-frame reference
+//!   directions (Eq. 29); the code forms them as rows 3 and 1 of `R(q)`.
+//! - The innovation is `ω_mes = Σ kᵢ (vᵢ × v̂ᵢ)` (Eq. 32c): measured cross
+//!   estimated. The per-reference weights `kᵢ > 0` are Eq. 30/31.
+//! - The gyro model is `Ω_y = Ω + b` (Eq. 11b) with `b` a constant bias.
+//!   The estimate `b̂` is SUBTRACTED from `Ω_y` and integrated with a NEGATIVE
+//!   sign: `Ω_c = Ω_y − b̂ + kP·ω_mes` and `ḃ̂ = −kI·ω_mes` (Eq. 32a/32b).
+//!   Those two signs are what make the Lyapunov derivative
+//!   `V̇ = −kP‖Pa(R̃M)‖²` (Eq. 33) negative semi-definite. Reversing either
+//!   inverts the feedback: the attitude can still level while `b̂` diverges.
+//! - One discrete step applies `q ← normalize(q ⊗ [1, Ω_c·dt/2])`, the
+//!   first-order form of Eq. 48b (cf. Eq. 45). Renormalizing each step is a
+//!   projection back onto the unit-quaternion sphere, not a paper equation.
+//! - Gains: `kp`/`ki` are `kP·w_a` and `kI·w_a` for gravity, `kp_mag`/
+//!   `ki_mag` the same for north, where `w_i > 0` are the relative confidence
+//!   weights of Eq. 30/31. Every gain must be positive; the default has
+//!   `w_m/w_a = 0.5`.
+//! - The manuscript is internally inconsistent by a factor of two: Eq. 32c
+//!   defines `ω_mes` with `kᵢ`, while Eq. 34 and Eq. 48a print `kᵢ/2`. This
+//!   code implements Eq. 32c verbatim and absorbs the factor in the positive
+//!   per-reference weights; no gain is retuned to compensate a sign.
 //!
 //! Scales:
 //! - unit quaternions / unit vectors: `2^UNIT_SHIFT` per unit;
@@ -202,7 +230,8 @@ impl Mahony {
         self.q
     }
 
-    /// Estimated gyro bias in Q16 rad/s. Subtract it from raw gyro samples.
+    /// Estimate `b̂` of the bias added to the gyro in Q16 rad/s (Eq. 11b,
+    /// Eq. 32b). Converges to the true bias `b`; subtract it from raw gyro.
     pub const fn bias(&self) -> Vec3 {
         Vec3::new(
             (self.bias_x >> (BIAS_SHIFT - RATE_SHIFT)) as i32,
@@ -276,29 +305,30 @@ impl Mahony {
         let g = self.gains;
         let dt_i = dt as i64;
 
-        // Integral feedback: bias absorbs the part of the rate the references
-        // cannot explain. Shift 26 converts Q8 * Q30 * Q20 into Q32 rad/s.
+        // Eq. 32b: ḃ̂ = −kI·ω_mes. Shift 26 converts Q8 * Q30 * Q20 into
+        // Q32 rad/s. The minus is the paper's sign; it is what drives b̂ to
+        // the bias b present in Ω_y = Ω + b (Eq. 11b).
         let bias_shift = GAIN_SHIFT + UNIT_SHIFT + DT_SHIFT - BIAS_SHIFT;
         let mut bx = self.bias_x;
         let mut by = self.bias_y;
         let mut bz = self.bias_z;
         if let Some(e) = e_acc {
-            bx += (g.ki as i64 * e.x as i64 * dt_i) >> bias_shift;
-            by += (g.ki as i64 * e.y as i64 * dt_i) >> bias_shift;
-            bz += (g.ki as i64 * e.z as i64 * dt_i) >> bias_shift;
+            bx -= (g.ki as i64 * e.x as i64 * dt_i) >> bias_shift;
+            by -= (g.ki as i64 * e.y as i64 * dt_i) >> bias_shift;
+            bz -= (g.ki as i64 * e.z as i64 * dt_i) >> bias_shift;
         }
         if let Some(e) = e_mag {
-            bx += (g.ki_mag as i64 * e.x as i64 * dt_i) >> bias_shift;
-            by += (g.ki_mag as i64 * e.y as i64 * dt_i) >> bias_shift;
-            bz += (g.ki_mag as i64 * e.z as i64 * dt_i) >> bias_shift;
+            bx -= (g.ki_mag as i64 * e.x as i64 * dt_i) >> bias_shift;
+            by -= (g.ki_mag as i64 * e.y as i64 * dt_i) >> bias_shift;
+            bz -= (g.ki_mag as i64 * e.z as i64 * dt_i) >> bias_shift;
         }
 
-        // Corrected body rate: gyro + bias + proportional reference error.
-        // Shift 22 converts Q8 * Q30 into Q16 rad/s.
+        // Eq. 32a: Ω_c = Ω_y − b̂ + kP·ω_mes. Shift 22 converts Q8 * Q30
+        // into Q16 rad/s; shift 16 turns the Q32 accumulator into Q16.
         let rate_shift = BIAS_SHIFT - RATE_SHIFT;
-        let mut wx = gyro.x as i64 + (bx >> rate_shift);
-        let mut wy = gyro.y as i64 + (by >> rate_shift);
-        let mut wz = gyro.z as i64 + (bz >> rate_shift);
+        let mut wx = gyro.x as i64 - (bx >> rate_shift);
+        let mut wy = gyro.y as i64 - (by >> rate_shift);
+        let mut wz = gyro.z as i64 - (bz >> rate_shift);
         if let Some(e) = e_acc {
             wx += (g.kp as i64 * e.x as i64) >> 22;
             wy += (g.kp as i64 * e.y as i64) >> 22;
@@ -310,7 +340,7 @@ impl Mahony {
             wz += (g.kp_mag as i64 * e.z as i64) >> 22;
         }
 
-        // Small-angle increment: dq ~ [1, w*dt/2]. Shift 7 converts
+        // Eq. 48b, first order: dq ~ [1, Ω_c·dt/2]. Shift 7 converts
         // (Q16 rad/s * Q20 s) into Q30 half-angles.
         let dq = Quat::new(
             UNIT as i32,

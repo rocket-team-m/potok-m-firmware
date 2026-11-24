@@ -126,6 +126,8 @@ fn gravity_reference_levels_a_tilted_attitude() {
 
 #[test]
 fn bias_estimate_cancels_a_constant_gyro_bias_on_all_axes() {
+    // Mahony Eq. 11b/32b: b̂ tracks the bias *added* to the gyro, and the
+    // filter subtracts it (Eq. 32a). The earlier assertion expected −b.
     let truth = (0.04_f64, -0.02_f64, 0.03_f64);
     let gyro = Vec3::new(rate(truth.0), rate(truth.1), rate(truth.2));
     let mut filter = Mahony::new(Gains::new(gain(4.0), gain(2.0), gain(4.0), gain(2.0)));
@@ -133,17 +135,17 @@ fn bias_estimate_cancels_a_constant_gyro_bias_on_all_axes() {
     run(&mut filter, 4000, gyro, Some(UP), Some(NORTH));
     let b = filter.bias();
     assert!(
-        (as_rate(b.x) + truth.0).abs() < 0.01,
+        (as_rate(b.x) - truth.0).abs() < 0.01,
         "bx = {}",
         as_rate(b.x)
     );
     assert!(
-        (as_rate(b.y) + truth.1).abs() < 0.01,
+        (as_rate(b.y) - truth.1).abs() < 0.01,
         "by = {}",
         as_rate(b.y)
     );
     assert!(
-        (as_rate(b.z) + truth.2).abs() < 0.01,
+        (as_rate(b.z) - truth.2).abs() < 0.01,
         "bz = {}",
         as_rate(b.z)
     );
