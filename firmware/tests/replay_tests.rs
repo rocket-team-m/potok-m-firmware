@@ -14,10 +14,10 @@ use potok_m_firmware::{
 use potok_protocol::{flags, Phase};
 
 use replay::{
-    map_phase, phase_code, phase_event, synthetic_tick, synthetic_validation_bytes, Replay,
-    ReplayError, ReplayEvent, SimPhaseCode, TrajectoryReader, ValidationReader, FIRMWARE_TICK_HZ,
-    SIM_FRAME_RATE_HZ, TICKS_PER_SIM_FRAME, TICK_US, TRAJECTORY_HEADER_SIZE, TRAJECTORY_MAGIC,
-    VALIDATION_HEADER_SIZE,
+    map_phase, phase_code, phase_event, pitot_i16, synthetic_tick, synthetic_validation_bytes,
+    PitotDp, Replay, ReplayError, ReplayEvent, SimPhaseCode, TrajectoryReader, ValidationReader,
+    FIRMWARE_TICK_HZ, SIM_FRAME_RATE_HZ, TICKS_PER_SIM_FRAME, TICK_US, TRAJECTORY_HEADER_SIZE,
+    TRAJECTORY_MAGIC, VALIDATION_HEADER_SIZE,
 };
 
 fn fixture(frames: u32) -> Vec<u8> {
@@ -316,4 +316,125 @@ fn replayed_ticks_drive_the_real_mockboard_control_loop() {
     );
     assert_eq!(board.applied.len(), 300);
     assert!(board.pets() > 250);
+}
+
+#[test]
+fn non_finite_pitot_is_unavailable_not_a_valid_zero_reading() {
+    assert_eq!(pitot_i16(f32::NAN), PitotDp::Unavailable);
+    assert_eq!(pitot_i16(f32::INFINITY), PitotDp::Unavailable);
+    assert_eq!(pitot_i16(f32::NEG_INFINITY), PitotDp::Unavailable);
+    assert_eq!(pitot_i16(0.0), PitotDp::Available(0));
+    assert_eq!(pitot_i16(12.7), PitotDp::Available(12));
+    assert_eq!(pitot_i16(40_000.0), PitotDp::Available(i16::MAX));
+    assert_eq!(pitot_i16(-40_000.0), PitotDp::Available(i16::MIN));
+}
+
+#[test]
+fn replay_distinguishes_a_corrupt_pitot_from_a_zero_reading() {
+    // features[7] is pitot_pa; one source frame is 8 features * 4 bytes.
+    let pitot_offset = |frame: usize| VALIDATION_HEADER_SIZE + 8 + 17 * 4 + frame * 8 * 4 + 7 * 4;
+
+    let mut corrupt = fixture(2);
+    let off = pitot_offset(0);
+    corrupt[off..off + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+    let bad = Replay::new(&corrupt, None)
+        .unwrap()
+        .next_tick()
+        .unwrap()
+        .unwrap();
+    assert_eq!(bad.pitot_dp, PitotDp::Unavailable);
+    assert_ne!(bad.sensor_flags & flags::FAULT, 0);
+
+    let good = Replay::new(&fixture(2), None)
+        .unwrap()
+        .next_tick()
+        .unwrap()
+        .unwrap();
+    assert_eq!(good.pitot_dp, PitotDp::Available(0));
+    assert_eq!(good.sensor_flags & flags::FAULT, 0);
+}
+
+#[test]
+fn phase_code_orders_boost_ahead_of_measured_ground_contact() {
+    // (time_s, height, climb_rate, burn_end_s, expected)
+    let cases = [
+        (0.0, -5.0, 0.0, 9.95, SimPhaseCode::Pad),
+        (0.6, 0.0, 0.0, 9.95, SimPhaseCode::Boost),
+        (0.6, -1.0, 0.0, 9.95, SimPhaseCode::Boost),
+        (9.95, 0.0, 0.0, 9.95, SimPhaseCode::Boost),
+        (9.951, 0.0, 0.0, 9.95, SimPhaseCode::Landed),
+        (10.0, 1.0, -1.0, 9.95, SimPhaseCode::Landed),
+        (10.0, 5.0, -1.0, 9.95, SimPhaseCode::Descent),
+        (10.0, 6.0, -2.0, 9.95, SimPhaseCode::Descent),
+        (10.0, 10.0, 0.0, 9.95, SimPhaseCode::Coast),
+        (10.0, 11.0, 0.0, 9.95, SimPhaseCode::Apogee),
+        (10.0, 50.0, 1.999, 9.95, SimPhaseCode::Apogee),
+        (10.0, 50.0, 2.0, 9.95, SimPhaseCode::Coast),
+    ];
+    for (t, h, v, burn_end, expected) in cases {
+        assert_eq!(
+            phase_code(t, h, v, burn_end),
+            expected,
+            "t={t} h={h} v={v} burn_end={burn_end}"
+        );
+    }
+}
+
+#[test]
+fn phase_gate_uses_only_available_columns_and_keeps_the_ground_gate() {
+    // validation.bin v3 has 8 features and 6 targets, no phase column. The
+    // trajectory sidecar has true height and climb rate, no phase either.
+    // Drive every baro height to zero so the old ground-first ordering would
+    // call a stationary pad Landed at t > 0.5 s, before boost.
+    let frames = 510u32;
+    let mut validation = fixture(frames);
+    let frame_bytes = VALIDATION_HEADER_SIZE + 8 + 17 * 4;
+    for frame in 0..frames as usize {
+        let off = frame_bytes + frame * 8 * 4 + 6 * 4;
+        validation[off..off + 4].copy_from_slice(&0.0f32.to_le_bytes());
+    }
+    let reader = ValidationReader::new(&validation).unwrap();
+    assert_eq!(reader.feature_count, 8);
+    assert_eq!(
+        reader.target_count, 6,
+        "no phase column in validation.bin v3"
+    );
+
+    // Truth: a real climb at 100 m, +5 m/s for every sidecar tick.
+    let mut trajectory = vec![0u8; TRAJECTORY_HEADER_SIZE + 8 + frames as usize * 26 * 4];
+    trajectory[0..8].copy_from_slice(TRAJECTORY_MAGIC);
+    trajectory[8..12].copy_from_slice(&3u32.to_le_bytes());
+    trajectory[12..16].copy_from_slice(&1u32.to_le_bytes());
+    trajectory[16..20].copy_from_slice(&frames.to_le_bytes());
+    trajectory[20..24].copy_from_slice(&26u32.to_le_bytes());
+    let mut pos = TRAJECTORY_HEADER_SIZE + 8;
+    for _ in 0..frames {
+        trajectory[pos + 2 * 4..pos + 3 * 4].copy_from_slice(&100.0f32.to_le_bytes());
+        trajectory[pos + 5 * 4..pos + 6 * 4].copy_from_slice(&5.0f32.to_le_bytes());
+        pos += 26 * 4;
+    }
+
+    let mut truthful = Replay::new(&validation, Some(&trajectory)).unwrap();
+    let mut features_only = Replay::new(&validation, None).unwrap();
+    let mut events = Vec::new();
+    for i in 0..frames as usize * TICKS_PER_SIM_FRAME as usize {
+        let a = truthful.next_tick().unwrap().unwrap();
+        let b = features_only.next_tick().unwrap().unwrap();
+        events.extend(a.event);
+        // phase_code sees the 50 Hz source time, not the 500 Hz tick clock.
+        let t = (i / TICKS_PER_SIM_FRAME as usize) as f32 / SIM_FRAME_RATE_HZ;
+        if t > 0.0 && t <= 0.5 {
+            assert_eq!(a.phase_code, SimPhaseCode::Boost, "t={t} with sidecar");
+            assert_eq!(b.phase_code, SimPhaseCode::Boost, "t={t} without sidecar");
+        }
+        if i == 500 * TICKS_PER_SIM_FRAME as usize {
+            assert_eq!(a.phase_code, SimPhaseCode::Coast, "truth height wins");
+            assert_eq!(
+                b.phase_code,
+                SimPhaseCode::Landed,
+                "baro ground still gates"
+            );
+        }
+    }
+    assert_eq!(events, vec![ReplayEvent::LiftOff, ReplayEvent::Burnout]);
 }

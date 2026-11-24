@@ -13,12 +13,18 @@
 //! from [`synthetic_tick`], and [`synthetic_validation_bytes`] writes a small
 //! real-shaped fixture into a caller-owned buffer for parser tests.
 //!
-//! Honest seam: the sidecars carry **no phase column**. `phase_code()` mirrors
-//! the simulator's `phase_at` using height and vertical speed; horizontal speed
-//! is approximated by vertical speed at apogee, and `burn_end_s` is a caller
-//! input (default 9.95 s from `sim/config/default.toml`). This is a deterministic
-//! replay of the flight, not a bit-exact reconstruction of the simulator's
-//! internal phase enum.
+//! Honest seam: neither artifact carries a **phase column**. `validation.bin`
+//! v3 has eight features and six targets (angles, confidence, health, accel);
+//! the trajectory sidecar adds true height and climb rate only. `phase_code()`
+//! reconstructs the simulator's phase from those quantities: Pad, then Boost
+//! (powered flight precedes a measured-height ground test), then ground
+//! contact, descent, apogee and coast. Horizontal speed is approximated by
+//! vertical speed at apogee, and `burn_end_s` is a caller input (default 9.95 s
+//! from `sim/config/default.toml`). This is a deterministic replay of the
+//! flight, not a bit-exact reconstruction of the simulator's internal phase enum.
+//!
+//! A non-finite pitot pressure is a typed [`PitotDp::Unavailable`], never a zero
+//! a consumer could read as a valid 0 Pa sample.
 
 use potok_protocol as pp;
 use pp::{flags, Phase, ReplyFrame};
@@ -97,7 +103,7 @@ pub struct SimTick {
     pub accel: [f32; 3],
     pub height: f32,
     pub pitot_pa: f32,
-    pub pitot_dp: i16,
+    pub pitot_dp: PitotDp,
     pub g_theta: [f32; 2],
     pub confidence: f32,
     pub ai_healthy: bool,
@@ -116,7 +122,7 @@ pub struct ReplayTick {
     pub gyro: [f32; 3],
     pub accel: [f32; 3],
     pub height: f32,
-    pub pitot_dp: i16,
+    pub pitot_dp: PitotDp,
     pub phase: Phase,
     pub phase_code: SimPhaseCode,
     pub event: Option<ReplayEvent>,
@@ -156,11 +162,22 @@ fn put_f32(out: &mut [u8], off: usize, v: f32) {
     put_u32(out, off, v.to_bits());
 }
 
-fn pitot_i16(pa: f32) -> i16 {
+/// Pitot wire value with a distinct unavailable state. A non-finite pressure
+/// must not become `0`: that is a valid 0 Pa sample to every downstream reader.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PitotDp {
+    /// Finite pressure, clamped to the `i16` wire field.
+    Available(i16),
+    /// Non-finite pressure: no usable reading exists.
+    Unavailable,
+}
+
+/// Checked conversion from a simulator pitot pressure to the wire field.
+pub fn pitot_i16(pa: f32) -> PitotDp {
     if pa.is_finite() {
-        pa as i16
+        PitotDp::Available(pa.clamp(i16::MIN as f32, i16::MAX as f32) as i16)
     } else {
-        0
+        PitotDp::Unavailable
     }
 }
 
@@ -188,16 +205,23 @@ pub fn phase_event(previous: SimPhaseCode, current: SimPhaseCode) -> Option<Repl
     }
 }
 
-/// Deterministic phase reconstruction from height and climb rate. The
+/// Deterministic phase reconstruction from time, height and climb rate. Neither
+/// artifact carries a phase column, so the gate orders Pad → Boost → ground →
+/// descent/apogee/coast: powered flight precedes a measured-height ground test,
+/// which otherwise labels a stationary pad `Landed` at `t > 0.5 s`. The
 /// simulator's `phase_at` also looks at horizontal speed; vertical speed is the
 /// available proxy at apogee, which is all the replay needs to drive the FSM.
 pub fn phase_code(time_s: f32, height: f32, climb_rate: f32, burn_end_s: f32) -> SimPhaseCode {
-    if height <= 0.0 && time_s > 0.5 {
-        SimPhaseCode::Landed
-    } else if time_s <= 0.0 {
+    if time_s <= 0.0 {
         SimPhaseCode::Pad
     } else if time_s <= burn_end_s {
+        // Powered flight precedes the ground test. The simulator checks
+        // true position first; without a sidecar the replay has only a baro
+        // height, and a pad/noisy reading at or below zero must not pre-empt
+        // boost and emit a spurious Touchdown.
         SimPhaseCode::Boost
+    } else if height <= 0.0 && time_s > 0.5 {
+        SimPhaseCode::Landed
     } else if climb_rate < 0.0 {
         if height < 5.0 {
             SimPhaseCode::Landed
@@ -545,7 +569,7 @@ impl<'a> Replay<'a> {
         let sensor_ok = sim.gyro.iter().all(|v| v.is_finite())
             && sim.accel.iter().all(|v| v.is_finite())
             && sim.height.is_finite()
-            && sim.pitot_pa.is_finite();
+            && sim.pitot_dp != PitotDp::Unavailable;
         let mut sensor_flags = flags::IMU_OK | flags::BARO_OK | flags::PITOT_OK;
         if !sensor_ok {
             sensor_flags |= flags::FAULT;
