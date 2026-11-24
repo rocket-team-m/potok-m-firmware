@@ -17,6 +17,7 @@ pub mod control;
 pub mod control_pid;
 pub mod deadman;
 pub mod deployment;
+pub mod geomag;
 pub mod interlocks;
 #[cfg(not(target_os = "none"))]
 pub mod mock;
