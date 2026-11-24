@@ -20,9 +20,17 @@ in code, toolchain and other documents are owner-lane items, not resolved here.
 
 The owner's wiring block diagram is the BOM/interface source for §1C
 (`/home/sehaxe/Downloads/5qWfXcTL-6tWOrtA-TiyO4iRbKyXnHvwpJ6E2ErQzmhOeHHmkUE3JOkdnEZg6Sugkj_in42w-5MGQiTDIiXvGwgk.jpg`).
-It shows functional groups and interface labels only: **no pin numbers, AFs,
+It shows functional groups and interface tags only: **no pin numbers, AFs,
 DMA streams, bus instances or chip selects**. Every such value stays
-`NOT ASSIGNED`.
+`NOT ASSIGNED`. §1C is the single authoritative transcription of the drawn
+tags; §1D lists every interface ambiguity as `NOT ASSIGNED` with the exact
+schematic/BOM question that closes it. All tags were re-read 2026-11-24 from
+rotated, high-zoom crops of the original 1751×1530 JPEG: **11 `SPI` tags, 3
+`UART` tags, one `USB`, one `1W`, one `АЦП`, one `PWM`; no `I2C` and no `QSPI`
+tag appears on the drawing.** This corrects earlier readings that assigned
+`I2C` to the KX134 pair and `QSPI` to the W25Q512, and the reading that assigned
+`I2C` to the LIS2MDL. A tag is evidence about a *drawn label*, not about a bus
+instance, a chip select or a routed net.
 
 The code-side boundary is `firmware/src/board.rs` (`trait Board`) and the Embassy
 adapter `firmware/src/main.rs`. `build_board()` is still
@@ -42,15 +50,15 @@ settled by the schematic/BOM owner, not silently resolved here.
 
 | ID | Part | Qty | Logical role | Expected interface family (label on wiring diagram where shown) | Bus selection status | Notes |
 |---|---|---:|---|---|---|---|
-| B01 | STM32H723 (family; exact variant/package `NOT ASSIGNED`) | 1 | flight controller, 500 Hz loop | SWD debug, USART/UART to Pi, SPI/I²C sensors, QSPI flash, timers, DMA, ADC, GPIO, IWDG | `NOT ASSIGNED` | H723 family correction; `STM32H743ZI` in README §5 is an H743-era starting point, not BOM approval |
+| B01 | STM32H723 (family; exact variant/package `NOT ASSIGNED`) | 1 | flight controller, 500 Hz loop | SWD debug, USART/UART to Pi, SPI sensors (no `I2C` tag drawn), SPI-tagged flash (OCTOSPI alternative open), timers, DMA, ADC, GPIO, IWDG | `NOT ASSIGNED` | H723 family correction; `STM32H743ZI` in README §5 is an H743-era starting point, not BOM approval |
 | B02 | ICM-42688-P | 1 | primary IMU (6-axis) | SPI or I²C | `NOT ASSIGNED` | working-BOM part, **absent from the wiring diagram** — reconcile (item 6) |
 | B03 | LSM6DSR | 1 | 3-axis accelerometer + 3-axis gyroscope | SPI (diagram `SPI`) | `NOT ASSIGNED` | diagram sensor group; redundant-IMU vote in `sensor_voting.rs`; no driver |
-| B04 | KX134-1211 | 2 | high-G accelerometers, ±8 g and ±16 g | I²C (diagram `I2C`) | `NOT ASSIGNED` | diagram shows two instances; working BOM listed one `KX134` — reconcile (item 6) |
+| B04 | KX134-1211 | 2 | high-G accelerometers, ±8 g and ±16 g | SPI (diagram `SPI` on both links, re-read 2026-11-24) | `NOT ASSIGNED` | diagram shows two instances; working BOM listed one `KX134` — reconcile (item 6); no `I2C` tag on the drawing |
 | B05 | LPS22HH | 1 | barometer | SPI (diagram `SPI`) | `NOT ASSIGNED` | `SensorChannel::Baro`; phase altitude source not wired |
 | B06 | LIS2MDL | 1 | 3-axis magnetometer | SPI (diagram `SPI`) | `NOT ASSIGNED` | `sensor_flags` mag bit |
 | B07 | MMC5983MA | 2 | magnetometer pair | SPI (diagram `SPI`) | `NOT ASSIGNED` | diagram shows both on SPI; independent CS unknown (C02/C10) |
 | B08 | LoRa 1262F30-T (SX1262-based, 915 MHz, SMA) | 1 | search/telemetry radio module | UART to MCU (diagram `UART`); SMA RF to antenna | `NOT ASSIGNED` | working BOM said SPI; diagram says UART — reconcile (item 7). `RadioHint` has no driver |
-| B09 | W25Q512 (512 Mbit / 64 MB) | 1 | configuration / log NOR flash | QSPI (diagram `QSPI`) | `NOT ASSIGNED` | H723 has OCTOSPI, not H743 QSPI (§1B); no driver in repo |
+| B09 | W25Q512 (512 Mbit / 64 MB) | 1 | configuration / log NOR flash | SPI (diagram `SPI`, re-read 2026-11-24; OCTOSPI alternative open) | `NOT ASSIGNED` | H723 has OCTOSPI, not H743 QSPI (§1B); no `QSPI` tag on the drawing; no driver in repo |
 | B10 | servo | 6 | 1–2 recovery, 3–6 control | PWM, one timer channel per servo (diagram `PWM`) | `NOT ASSIGNED` | code has **two** axes (`pitch`, `yaw`); mapping open (C03/C12) |
 | B11 | parachute / recovery device (working BOM) | 2 | two-stage recovery | `NOT ASSIGNED` | `NOT ASSIGNED` | diagram shows **recovery servos 1–2**, not pyro/spring GPIO — reconcile (C12) |
 | B12 | H3LIS331DL | 1 | accelerometer | SPI (diagram `SPI`) | `NOT ASSIGNED` | diagram sensor group; absent from the working BOM as a distinct part — reconcile (item 6) |
@@ -88,9 +96,12 @@ settled by the schematic/BOM owner, not silently resolved here.
    camera+flash video pair. The owner must reconcile the two lists before any
    pin assignment (HIL BU12).
 7. Diagram interface labels disagree with the working BOM: LoRa and GPS are
-   `UART` (not SPI), W25Q512 is `QSPI`, the KX134 pair is `I2C`, thermometer is
-   `1W`, photoresistors are `АЦП`/ADC. Diagram labels define the typed
-   interfaces here; bus instances remain `NOT ASSIGNED`.
+   `UART` (not SPI), W25Q512 is `SPI` (not `QSPI`), the KX134 pair is `SPI`
+   (not `I2C`), LIS2MDL is `SPI` (not `I2C`), thermometer is `1W`,
+   photoresistors are `АЦП`/ADC, and the recovery trunk is `PWM` while servos
+   3–6 are untagged. The 2026-11-24 re-read corrected the earlier `I2C`/`QSPI`
+   readings (§1C). Diagram tags define the typed interfaces here; bus
+   instances remain `NOT ASSIGNED` (§1D).
 8. Recovery is drawn as servos 1–2 on `PWM`, not spring/pyro GPIO. `B11` and
    the `SpringOutputs` / `ArmChannels` code seam stay open until reconciled.
 9. The diagram draws shared lines and generic connector squares; it gives no
@@ -108,8 +119,8 @@ pin, AF and DMA cells remain `NOT ASSIGNED`.
 
 | Family | Needed for (code-side role / BOM) | H723 family-level availability (datasheet expectation) | Unassigned value | Decision that closes it | Status |
 |---|---|---|---|---|---|
-| SPI | Sensors B03, B05–B07, B12, B15 (diagram `SPI`); P17–P22, P38, P42 | present — 6×SPI incl. 4×I2S (DS13313) | instance, SCK/MISO/MOSI/NSS pins, AF, DMA; CS per device | schematic netlist + exact H723 variant/package + procured part pinout | `NOT ASSIGNED` |
-| I²C | KX134-1211 ×2 (B04, diagram `I2C`); P18/P41 | present — 5×I²C (DS13313) | instance, SCL/SDA, AF, device addresses | schematic bus selection + BOM addresses | `NOT ASSIGNED` |
+| SPI | Nine drawn sensor links — B03/B04 ×2/B05/B06/B07 ×2/B12/B15 (all `SPI`); plus W25Q512 (`SPI`); off-MCU video link `SPI`; P17–P24, P38, P41, P42, P43 | present — 6×SPI incl. 4×I2S (DS13313) | instance, SCK/MISO/MOSI/NSS pins, AF, DMA; CS per device | schematic netlist + exact H723 variant/package + procured part pinout (§1D Q1–Q4) | `NOT ASSIGNED` |
+| I²C | **No drawn `I2C` tag** — conditional only if a schematic/BOM decision remaps an SPI part (e.g. MMC5983MA ×2 or a second LPS22HH) | present — 5×I²C (DS13313) | instance, SCL/SDA, AF, device addresses | schematic bus selection + BOM addresses (§1D Q18) | `NOT ASSIGNED` |
 | USART / UART | Pi AI link (B19, P01–P04), LoRa (B08, P24), GPS (B16, P37) | present — 5×USART + 5×UART + 1×ULP UART (DS13313) | instance, TX/RX pins, AF, two RX DMA slots | schematic instance/pins/AF/DMA + BOM variant | `NOT ASSIGNED` |
 | Timers | Embassy time driver (P05; TIM2 is an H743-era starting point only), servo PWM P07–P09/P44 | present — 32-bit GP, 16-bit GP and advanced-control families (DS13313: 4 / 10 / 2) | instance + channel + AF per output | schematic timer assignment + BOM confirmation of `time-driver-tim2` | `NOT ASSIGNED` |
 | DMA | UART double-buffer RX/TX (P01–P03), later sensor streams | present — DMA1/DMA2 plus MDMA and BDMA on H723 (DS13313 bus matrix) | controller, stream/channel per role, priorities | schematic + Embassy channel allocation; P02/P03 distinct (C01) | `NOT ASSIGNED` |
@@ -118,7 +129,7 @@ pin, AF and DMA cells remain `NOT ASSIGNED`.
 | IWDG | Watchdog (P06, `setup_iwdg(p.IWDG1)`) | present — 2× watchdog (DS13313); no external pin | instance — IWDG1 is a code starting point | BOM/variant confirm; no schematic pin | `PERIPHERAL`, instance `NOT ASSIGNED` |
 | SWD | Flash/debug (P34) | debug port present on family | header/pins | schematic debug connector + BOM probe | `NOT ASSIGNED` |
 | 1-Wire | Thermometer (B14/P40, diagram `1W`) | **no dedicated 1-Wire peripheral** on H723; GPIO + driver decision, not a peripheral claim | GPIO pin, driver choice, timing source | schematic net + BOM part + driver lane | `NOT ASSIGNED` |
-| QSPI / OCTOSPI-class | W25Q512 (B09/P23, diagram `QSPI`) | H723 has OCTOSPI1/2, **not** H743's Quad-SPI (§1B) | instance, IO pins, AF, CS/clock | schematic + exact variant/package | `NOT ASSIGNED` |
+| SPI / OCTOSPI-class | W25Q512 (B09/P23) — diagram tag is `SPI`; OCTOSPI1/2 is an open implementation alternative, not a drawn tag | H723 has OCTOSPI1/2, **not** H743's Quad-SPI (§1B) | instance, IO pins, AF, CS/clock, DMA request | schematic bus choice + exact variant/package (§1D Q5) | `NOT ASSIGNED` |
 | USB | USB port (B18/P35) | USB OTG present on H723 family | instance, pins, AF | schematic + BOM variant | `NOT ASSIGNED` |
 
 ## 1B. H743-only or unavailable peripherals — explicit flags
@@ -130,43 +141,93 @@ procured H723 board; none may fill a pin cell in §3.
 |---|---|---|---|---|
 | FMC with 32-bit bus / SDRAM on any package | H723 FMC is 16-bit; the NOR/SDRAM controller exists only on Z packages (ZG/ZI), not V packages (DS13313 Table 1) | No — no external RAM/SDRAM in the BOM | schematic/BOM if an FMC device is ever added | `NOT NEEDED` — do not assume |
 | JPEG codec | H743 has it; H723 does not (ST H7 family overview) | No | none | `UNAVAILABLE on H723` |
-| Dual-mode Quad-SPI (QSPI) | H723 has OCTOSPI1/2 instead of H743's QSPI | **Yes** — diagram labels the W25Q512 link `QSPI`; instance/pins `NOT ASSIGNED` | schematic bus choice + BOM part variant; do not reuse H743 QSPI | `DO NOT SUBSTITUTE` |
+| Dual-mode Quad-SPI (QSPI) | H723 has OCTOSPI1/2 instead of H743's QSPI | **Open** — diagram tags W25Q512 `SPI`; an OCTOSPI implementation is a schematic decision, instance/pins `NOT ASSIGNED` | schematic bus choice + BOM part variant; do not reuse H743 QSPI (§1D Q5) | `DO NOT SUBSTITUTE` |
 | ADC3 as a third 16-bit SAR ADC | H723's third ADC is 12-bit, not 16-bit (2×16-bit + 1×12-bit) | ADC sense only (P26/P27); instance unassigned | schematic front-end + BOM | `DIFFERENT — NOT ASSIGNED` |
 | `stm32h743zi`, `STM32H743ZI`, `stm32h743.repl`, `CORE_HZ = 480_000_000` | H743-only toolchain/clock identifiers in `firmware/Cargo.toml`, `.cargo/config.toml`, `docs/RENODE.md` + `emulator/`, `firmware/src/perf.rs:32` | Not a peripheral, but must not be carried into an H723 flash | owner lanes outside this document | `OUT OF SCOPE — H743 identifier` |
 | `memory.x` FLASH 2048K / RAM 128K @ `0x20000000` | H723 family: up to 1 MB flash, 564 KB SRAM; 2048K is an H743 value. The 128K at `0x20000000` matches family DTCM but is not a signed map (AXI/SRAM banks differ) | memory map must match the procured variant | BOM + schematic → `memory.x` owner | `NOT ASSIGNED` |
 | Clock budget at 480 MHz (H743 rating) | H723 rated up to 550 MHz (DS13313); actual clock comes from schematic oscillators/PLL | cycle budget depends on it | owner code lane (`perf.rs`) + schematic clock source | `NOT ASSIGNED` |
 
-## 1C. Wiring-derived capability table
+## 1C. Authoritative interface table (single source for drawn tags)
 
-Transcribed from the owner's wiring block diagram (path in the header note).
-The diagram shows groups and interface **labels**, never a pin number, AF,
-DMA stream, bus instance, chip select or address strap. Every physical cell
-therefore stays `NOT ASSIGNED`; `BLOCKED` is the code/driver state, not a
-hardware verdict. The diagram is the BOM/interface source for this revision,
-subject to the reconciliation items in §1.
+This is the one authoritative transcription of the owner's wiring block
+diagram (path in the header note). `RESOURCE_MAP.md` §2 and `HIL_CHECKLIST.md`
+§3 are derived views of it and must not re-derive or override a tag. Every
+tag was read from the original 1751×1530 JPEG in rotated, high-zoom crops on
+2026-11-24. The diagram shows groups and interface **tags** only: never a pin
+number, AF, DMA stream, bus instance, chip select, address strap or net name.
+Every such value stays `NOT ASSIGNED`; `BLOCKED` is the code/driver state, not
+a hardware verdict.
 
-| Capability | Diagram group / part | Typed interface from diagram | MCU involvement | Physical pin / instance | Status | Decision that closes it |
+| ID | Diagram group / part | Tag on drawn link (authoritative) | MCU path drawn? | Bus instance / pins / CS / address | Status | Question that closes it |
 |---|---|---|---|---|---|---|
-| Power and USB input | `Питание`: battery, toggle, USB port (B18) | power lines; `USB` | MCU power pins + USB device | `NOT ASSIGNED` | `BLOCKED` — rails/test points unknown | schematic rails + connector + BOM regulator (PB §6) |
-| Recovery actuation | `Система спасения`: servos 1–2 (B10) | `PWM` | MCU timer channels | `NOT ASSIGNED` | `BLOCKED` — no driver; conflicts with B11 (§1 item 8) | schematic PWM nets + owner servo↔recovery mapping (C12) |
-| Control actuation | `Система управления`: servos 3–6 (B10) | `PWM` (one drawn line per servo) | MCU timer channels | `NOT ASSIGNED` | `BLOCKED` — code has only pitch/yaw | schematic PWM nets + 6↔2 axis mapping (C03) |
-| AI advisor link | `ИИ`: Raspberry Pi 4B 2 GB (B19) | `UART` (as used by P01–P04) | MCU USART TX/RX + DMA | `NOT ASSIGNED` | `STUB` (`main.rs:52`) | schematic USART/AF/DMA + protocol direction |
-| Radio search/telemetry | `Связь`: LoRa 1262F30-T, SX1262-based, 915 MHz SMA (B08) | `UART` to MCU; SMA RF to antenna | MCU USART + control GPIO | `NOT ASSIGNED` | `BLOCKED` — no driver | schematic UART/AF/GPIO + module pinout; reconcile item 7 |
-| GNSS | `Связь`: GPS module, owner says SIM28-class (B16) | `UART` | MCU USART RX | `NOT ASSIGNED` | `BLOCKED` — no driver | schematic UART/AF + BOM part |
-| Configuration / log memory | `Память`: W25Q512 512 Mbit / 64 MB (B09) | `QSPI` (H723: OCTOSPI-class) | MCU OCTOSPI IO/CS/clock | `NOT ASSIGNED` | `BLOCKED` — no driver | schematic QSPI net + variant/package; §1B do-not-substitute |
-| SPI sensor set | `Датчики`: H3LIS331DL (B12), LIS2MDL (B06), LPS22HH ×2 (B05/B15), LSM6DSR 3-axis accel+gyro (B03), MMC5983MA ×2 (B07) | `SPI` on each drawn link | shared MCU SPI bus (drawing shows common lines) | `NOT ASSIGNED` | `BLOCKED` — no drivers | schematic CS lines, bus instance, arbitration (C10); no CS shown on diagram |
-| I²C high-G pair | `Датчики`: KX134-1211 ±8 g and ±16 g (B04) | `I2C` | MCU I²C bus | `NOT ASSIGNED` | `BLOCKED` — no drivers | schematic bus instance + device addresses (C11) |
-| Thermometer | `Датчики`: thermometer (B14) | `1W` (1-Wire; no dedicated H723 peripheral) | MCU GPIO + driver | `NOT ASSIGNED` | `BLOCKED` — no driver | schematic net + BOM part + driver decision |
-| Light sense | `Датчики`: photoresistors (B13) | `АЦП` / ADC | MCU ADC channel + pin | `NOT ASSIGNED` | `BLOCKED` — no driver | schematic front-end + ADC channel |
-| Video subsystem | `Видео`: camera + flash memory (B17) | no interface to STM32 drawn | none shown | `NOT ASSIGNED` (`OFF_MCU`) | `BLOCKED` — off-MCU subsystem | owner decision whether it belongs to STM32 at all; absent from MCU matrix |
-| Debug | not shown on diagram | SWD | MCU debug port | `NOT ASSIGNED` | `BLOCKED` — debug header unknown | schematic debug connector + BOM probe (P34) |
+| W01 | `Видео` — `FLASH-ПАМЯТЬ` (B17) | `SPI` | **No** — link leaves the group to an off-page antenna-like symbol | `NOT ASSIGNED` | `BLOCKED` — off-MCU | Q9 |
+| W02 | `Память` — W25Q512 512 Mbit / 64 MB (B09) | `SPI` (not `QSPI`) | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q5 |
+| W03 | `Датчики` — H3LIS331DL (B12) | `SPI` | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q2, Q3 |
+| W04 | `Датчики` — KX134-1211 ±8 g (B04) | `SPI` (not `I2C`) | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q4 |
+| W05 | `Датчики` — KX134-1211 ±16 g (B04) | `SPI` (not `I2C`) | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q4 |
+| W06 | `Датчики` — LIS2MDL (B06) | `SPI` (not `I2C`) | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q2, Q3 |
+| W07 | `Датчики` — БАРОМЕТР LPS22HH (B05) | `SPI` | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q2, Q3 |
+| W08 | `Датчики` — LSM6DSR accel+gyro (B03) | `SPI` | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q2, Q3 |
+| W09 | `Датчики` — MMC5983MA #1 (B07) | `SPI` | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q2, Q3 |
+| W10 | `Датчики` — MMC5983MA #2 (B07) | `SPI` | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q2, Q3 |
+| W11 | `Датчики` — pitot БАРОМЕТР LPS22HH (B15) | `SPI` | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q2, Q3 |
+| W12 | `Связь` — LoRa 1262F30-T, SX1262-based (B08) | `UART` | Yes, bidirectional | `NOT ASSIGNED` | `BLOCKED` — no driver | Q6 |
+| W13 | `Связь` — GPS module (B16) | `UART` | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q8 |
+| W14 | `ИИ` — Raspberry Pi 4B 2 GB (B19) | `UART` | Yes | `NOT ASSIGNED` | `STUB` (`main.rs:52`) | Q7 |
+| W15 | `Питание` — `USB ПОРТ` (B18) | `USB` | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q16 |
+| W16 | `Датчики` — ТЕРМОМЕТР (B14) | `1W` | Yes | `NOT ASSIGNED` | `BLOCKED` — no 1-Wire peripheral/driver | Q10 |
+| W17 | `Датчики` — ФОТОРЕЗИСТОРЫ (B13) | `АЦП` (ADC) | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver | Q11 |
+| W18 | `Система спасения` — servos 1–2 trunk (B10/B11) | `PWM` | Yes | `NOT ASSIGNED` | `BLOCKED` — no driver; B11 conflict | Q13 |
+| W19 | `Система управления` — servos 3–6 (B10) | **no tag drawn** — four plain lines | Yes | `NOT ASSIGNED` | `BLOCKED` — no code role for four of six | Q12 |
+| W20 | `Питание` — battery + toggle (B18) | no interface tag — power lines | Yes | `NOT ASSIGNED` | `BLOCKED` — rails/test points unknown | Q16 |
+| W21 | Debug — **not shown on the drawing** | `SWD` (not a drawn tag) | not shown | `NOT ASSIGNED` | `BLOCKED` — header unknown | Q17 |
 
-**Unknown bus arbitration / CS:** the diagram draws several sensors on what
-look like common lines and marks each link only by a generic connector square.
-It does not show chip selects, I²C addresses, bus ownership, DMA channels or
-the SPI instance. Do not read a shared drawn line as one selected bus and do
-not assume a chip-select is duplicated: C10/C11 stay `NOT VERIFIED` until the
-signed schematic names them.
+**Tag inventory (authoritative):** 11 `SPI` (W01–W11; nine of them sensor links
+reaching the MCU, plus the W25Q512 and the off-MCU video link), 3 `UART`
+(W12–W14), 1 `USB` (W15), 1 `1W` (W16), 1 `АЦП` (W17), 1 `PWM` (W18, recovery
+trunk only), and no tag on servos 3–6 (W19). **No `I2C` tag and no `QSPI` tag
+appear anywhere on the drawing.** The earlier readings that named the KX134
+pair and the flash `I2C`/`QSPI`, and the reading that named LIS2MDL `I2C`, were
+misreads of the rotated text and are corrected here. The `PWM` tag sits on the
+recovery trunk at the dashed group boundary; it does not tag the four control
+servo lines.
+
+**What the drawing does not give:** it marks several sensors on lines that look
+common and uses generic connector squares; it shows no chip select, address
+strap, bus ownership, DMA channel or SPI instance. A shared drawn line is not
+proof of one selected bus; do not assume a chip-select is duplicated. C10/C11
+stay `NOT VERIFIED` until the signed schematic names them, and every physical
+cell stays `NOT ASSIGNED` (§1D).
+
+## 1D. Interface ambiguities — `NOT ASSIGNED` with the exact question
+
+Every open interface question is stated here as the question to put to the
+schematic/BOM owner. No answer is guessed in this document, and no bus
+instance, pin, CS, address or DMA stream is invented. `NOT ASSIGNED` is the
+status of each unanswered item; the gate IDs are `HIL_CHECKLIST.md` IDs.
+
+| Q | Ambiguity — status `NOT ASSIGNED` | Exact schematic / BOM question | Owner | Gate |
+|---|---|---|---|---|
+| Q1 | Exact H723 variant and package | Which STM32H723 variant and package (VE/VG/ZE/ZG, LQFP100/LQFP144/UFBGA144/TFBGA100) is procured, with which bonded SPI/I²C/USART/timer/OCTOSPI instances, GPIO count and FLASH size (≤ 1 MB)? | schematic + BOM | BU01, R01 |
+| Q2 | SPI instance per drawn link | For each of the 11 `SPI`-tagged links W01–W11, which instance (SPI1…SPI6 or OCTOSPI1/2) does it land on, and which links share SCK/MISO/MOSI? | schematic netlist | D02, R04 |
+| Q3 | SPI chip selects | Which GPIO net is CS for each of the nine SPI sensors and the W25Q512 (and video, if on MCU), and is any CS net shared by two devices (it must not be)? | schematic | C10, R04 |
+| Q4 | KX134 ×2 identity and CS | Are both KX134-1211 parts (±8 g, ±16 g) fitted — the working BOM lists one and the `potok-m` draft BOM lists H3LIS331DL instead — and what are the two SPI CS nets and part variants? | schematic + BOM | BU12, D08 |
+| Q5 | W25Q512 SPI vs OCTOSPI | The drawing tags this link `SPI`. Is the production interface plain SPI or OCTOSPI1/2 (`QSPI`-class), and what are the instance, IO/ CLK/ CS pins and DMA request? Do not substitute H743 Quad-SPI. | schematic + BOM | D03, R06 |
+| Q6 | LoRa UART vs SPI | The drawing tags LoRa `UART`; the working BOM said SPI. Which is wired; if UART, which USART, pins, AF and baud; if SPI, which NSS/RESET/BUSY/DIO GPIO and instance? | schematic + BOM | D05, R05 |
+| Q7 | Raspberry Pi UART vs USB | The drawing tags the Pi link `UART`; other material says USB. Is it UART or USB, and if USB what OTG role and what relation to `USB ПОРТ`? | schematic + owner | D06, R05 |
+| Q8 | GPS part and link | No part number is drawn for the GPS module (owner: SIM28-class). Which part, baud rate, RX/TX direction and supply? | BOM + schematic | D07, R05 |
+| Q9 | Video endpoint | The video `FLASH-ПАМЯТЬ` `SPI` tag leaves the group to an off-page symbol with no MCU line. Does camera + video flash attach to the STM32 or to a separate video SoC; if on MCU, which part numbers, data rate and buffer/DMA budget? | schematic + BOM + owner | D04, R07 |
+| Q10 | Thermometer `1W` | Which 1-Wire part is fitted (no number drawn) and which MCU resource implements `1W` — timer capture, UART single-wire or bit-banged GPIO (the H723 has no dedicated 1-Wire peripheral)? | BOM + schematic | D11, R08 |
+| Q11 | Photoresistor ADC | How many photoresistors are fitted, and which ADC instance/channel/pin and analogue front-end do they use? | BOM + schematic | D11, R08 |
+| Q12 | Servos 3–6 untagged | The four control-servo lines carry no tag. Are they PWM, as the recovery trunk is; which timer instance/channel/AF drives each; and how do six servos map to the code's two axes (pitch/yaw)? | schematic + owner | D10, R02, C03 |
+| Q13 | Recovery technology | The recovery trunk is tagged `PWM` on servos 1–2 while the working BOM describes two parachutes with spring/pyro outputs. Is recovery servo-driven, pyro/squib or spring solenoid, and which GPIO/PWM nets implement it? | schematic + BOM + owner | C12, BU12 |
+| Q14 | Phase-event and pitot sources | The diagram has a pitot LPS22HH on `SPI` but no discrete phase-event lines. Are Burnout/Apogee/Descent/Touchdown sensed on GPIO or derived from sensors, and what are the nets? | schematic | S05, C05 |
+| Q15 | ICM-42688-P / MS5611 | The working BOM names ICM-42688-P and owner prose mentions MS5611; neither is drawn. Are either fitted, and if so on which bus and CS/address? | BOM + schematic | BU12, D08 |
+| Q16 | Power, USB and sense | What are the battery/toggle/USB rails and test points, the regulator part, the USB role (device/host), VBUS/ID wiring and the sense pin? | schematic + BOM | BU03, BU04 |
+| Q17 | SWD debug | No debug connector is drawn. Which header, pins and probe are used? | schematic + BOM | BU09, P34 |
+| Q18 | Conditional I²C | No `I2C` tag is drawn. If a schematic/BOM decision moves any part to I²C (e.g. MMC5983MA ×2 or a second LPS22HH), which I²C instance and what unique addresses/straps? | schematic + BOM | C11, C02 |
+| Q19 | DMA map | Which DMA controller (DMA1/DMA2/BDMA/MDMA), stream/channel and DMAMUX request does each role own; are the two Pi RX slots distinct and no sensor/flash stream aliased to UART TX/RX? | schematic + firmware | D12, R03, C01 |
+| Q20 | Timer / time-driver map | Which timer instance drives Embassy time (TIM2 is an H743-era starting point, not an assignment), and which (timer, channel) pairs drive the six servos, the 1W capture and the buzzer, with no duplicate pair? | schematic + firmware | D10, R02 |
 
 ## 2. Status and type vocabulary
 
@@ -191,7 +252,7 @@ number, and only after schematic sign-off in §5.
 | `ADC_IN` | Analogue sense input (battery, temperature) |
 | `PERIPHERAL` | Internal block (IWDG, time driver) |
 | `SCHEDULER` | No physical resource owned |
-| `QSPI_*` | QSPI/OCTOSPI-class IO, clock or chip select (diagram `QSPI`) |
+| `QSPI_*` | OCTOSPI-class IO/clock/CS — an **open alternative** for W25Q512, not a drawn tag (§1D Q5) |
 | `ONE_WIRE` | 1-Wire data line; on H723 a GPIO+driver decision, not a dedicated peripheral |
 | `USB` | USB device port (diagram `USB`) |
 | `OFF_MCU` | Subsystem with no interface to STM32 drawn; owns no MCU pin |
@@ -221,12 +282,12 @@ state of the code path, not of the hardware.
 | P15 | Sensor health bit — pitot | `GPIO_IN` | none in BOM | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — part unknown |
 | P16 | ICM-42688-P bus (working BOM; absent from diagram) | `SPI_*`/`I2C_*` | B02 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — reconcile, no driver |
 | P17 | LSM6DSR 3-axis accel + gyro (diagram `SPI`) | `SPI_*` | B03 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no driver |
-| P18 | KX134-1211 ×2 ±8 g/±16 g (diagram `I2C`) | `I2C_*` | B04 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no driver; addresses unknown |
+| P18 | KX134-1211 ×2 ±8 g/±16 g (diagram `SPI`) | `SPI_*` | B04 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no driver; CS unknown (Q4) |
 | P19 | LPS22HH barometer (diagram `SPI`) | `SPI_*` | B05 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no driver |
 | P20 | LIS2MDL magnetometer (diagram `SPI`) | `SPI_*` | B06 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no driver |
 | P21 | MMC5983MA #1 (diagram `SPI`) | `SPI_*` | B07 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — CS `NOT ASSIGNED` |
 | P22 | MMC5983MA #2 (diagram `SPI`) | `SPI_*` | B07 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — CS `NOT ASSIGNED` |
-| P23 | W25Q512 512 Mbit / 64 MB (diagram `QSPI`) | `QSPI_*` | B09 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no driver; OCTOSPI instance unknown |
+| P23 | W25Q512 512 Mbit / 64 MB (diagram `SPI`) | `SPI_*` (OCTOSPI open) | B09 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no driver; instance/CS unknown (Q5) |
 | P24 | LoRa 1262F30-T UART (diagram `UART`) | `UART_TX`/`UART_RX` | B08 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no driver; was SPI in working BOM |
 | P25 | LoRa control GPIO (not shown on diagram) | `GPIO_IN`/`GPIO_OUT` | B08 | `NOT ASSIGNED` | — | — | `NOT ASSIGNED` | `BLOCKED` — no driver; lines unknown |
 | P26 | Battery sense (`self_test::Battery`, diagram battery) | `ADC_IN` | B18 | `NOT ASSIGNED` | — | — | `NOT ASSIGNED` | `BLOCKED` — divider/ADC unknown |
@@ -244,7 +305,7 @@ state of the code path, not of the hardware.
 | P38 | H3LIS331DL accelerometer (diagram `SPI`) | `SPI_*` | B12 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no driver |
 | P39 | Photoresistors (diagram `АЦП`) | `ADC_IN` | B13 | `NOT ASSIGNED` | — | — | `NOT ASSIGNED` | `BLOCKED` — no driver; part count unknown |
 | P40 | Thermometer (diagram `1W`) | `ONE_WIRE` | B14 | `NOT ASSIGNED` | — | — | `NOT ASSIGNED` | `BLOCKED` — no 1-Wire peripheral/driver |
-| P41 | KX134-1211 ×2 I²C (diagram `I2C`) | `I2C_*` | B04 | `NOT ASSIGNED` | `NOT ASSIGNED` | — | `NOT ASSIGNED` | `BLOCKED` — addresses unknown |
+| P41 | KX134-1211 ×2 SPI (diagram `SPI`) | `SPI_*` | B04 | `NOT ASSIGNED` | `NOT ASSIGNED` | — | `NOT ASSIGNED` | `BLOCKED` — CS unknown (Q4) |
 | P42 | Second LPS22HH, flight-path baro (diagram `SPI`) | `SPI_*` | B15 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — no driver; MS5611 conflict open |
 | P43 | Camera + flash video pair | `OFF_MCU` | B17 | `NOT ASSIGNED` | — | — | `NOT ASSIGNED` | `BLOCKED` — no interface to STM32 drawn |
 | P44 | Recovery servos 1–2 (diagram `PWM`) | `TIM_PWM` | B10/B11 | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `NOT ASSIGNED` | `BLOCKED` — conflicts with pyro/spring B11 (C12) |
@@ -271,9 +332,9 @@ means a lane outside this document. Gate IDs without a `PIN` prefix are
 | P11 | Phase-event source pins (Burnout/Apogee/Descent/Touchdown) | schematic nets; BOM decision — no such sensor part appears in the current BOM | C05; S05 |
 | P12–P15 | GPIO health bits; pitot source | schematic pins; BOM decision for pitot (part absent from BOM) | S04 |
 | P16–P22 | Bus instance, pins, AF, CS/address straps | schematic bus netlist; BOM bus protocol per part; driver lane for the missing drivers. Diagram shows no CS/address — do not infer them | C02; C06; C10; C11 |
-| P23–P25 | QSPI flash IO/CS/clock, LoRa UART + control GPIO | schematic nets; BOM module pinout; reconcile LoRa SPI→UART | C06; item 7 |
+| P23–P25 | SPI flash IO/CS (OCTOSPI open), LoRa UART + control GPIO | schematic nets; BOM module pinout; reconcile drawn LoRa `UART` vs BOM SPI (§1D Q5/Q6) | C06; item 7 |
 | P35–P36 | USB port pins and power/toggle sense | schematic power/USB nets + BOM regulator | BU04 |
-| P37–P42 | GPS UART, H3LIS331DL/second LPS22HH SPI, photoresistor ADC, thermometer 1-Wire, KX134-1211 ×2 I²C | schematic nets + BOM part numbers; no CS/addresses shown; driver lane | C10; C11; S09 |
+| P37–P42 | GPS UART, H3LIS331DL/second LPS22HH SPI, photoresistor ADC, thermometer 1-Wire, KX134-1211 ×2 SPI | schematic nets + BOM part numbers; no CS/addresses shown; driver lane (§1D Q2–Q4, Q8, Q10, Q11) | C10; C11; S09 |
 | P43 | Video subsystem interface | owner decision whether camera+flash connect to STM32 at all | §1 item 6 |
 | P44 | Recovery servo PWM nets and B11 conflict | schematic PWM nets + owner decision servo recovery vs pyro/spring | C12; BU12 |
 | P26–P27 | ADC instance/channel/pin and analogue front-end | schematic divider/thermistor and pin; BOM sensor parts | BU04 |
@@ -297,8 +358,8 @@ signed against the schematic.
 | C07 | Rail/power test points from `POWER_BUDGET.md` have physical probe access | otherwise ripple and sag cannot be measured at the load | `NOT VERIFIED` |
 | C08 | Exact H723 variant/package and FLASH/RAM map signed before any §3 cell is filled | package decides bonded pins, FMC availability and GPIO count; FLASH 2048K is an H743 value | `NOT VERIFIED` |
 | C09 | No H743-only peripheral or identifier carried into the H723 pin map (§1B) | FMC/SDRAM, JPEG, H743 Quad-SPI, 3×16-bit ADC and H743 tool identifiers are not H723 facts | `NOT VERIFIED` |
-| C10 | SPI chip selects and bus arbitration for the diagram's shared sensor lines are named | seven SPI devices plus QSPI memory cannot collapse to one unselected bus; diagram shows no CS | `NOT VERIFIED` |
-| C11 | KX134-1211 ×2 I²C addresses and bus instance are distinct | ±8 g and ±16 g parts must not alias on one address | `NOT VERIFIED` |
+| C10 | SPI chip selects and bus arbitration for the diagram's shared sensor lines are named | nine SPI sensors plus the SPI-tagged flash (and the video link if it lands on the MCU) cannot collapse to one unselected bus; no CS is drawn (§1D Q2/Q3) | `NOT VERIFIED` |
+| C11 | KX134-1211 ×2 have distinct SPI CS (and any I²C remap distinct addresses) | both are SPI-tagged parts, not an I²C pair; no CS/address is drawn (§1D Q4/Q18) | `NOT VERIFIED` |
 | C12 | Recovery servos 1–2 vs `B11` pyro/spring outputs reconciled | diagram shows PWM recovery, working BOM shows spring/pyro GPIO; do not merge the two | `NOT VERIFIED` |
 | C13 | Schematic-to-BOM reconciliation from the owner wiring diagram signed before any pin assignment | diagram omits ICM-42688-P/MS5611 and adds several parts; interface labels differ from the working BOM | `NOT VERIFIED` |
 
@@ -319,6 +380,7 @@ No row is signed. A signature attaches the schematic revision it was read from.
 | `*TODO(schematic)` / `*TODO(bom)` markers replaced in `main.rs`, `memory.x`, `firmware/Cargo.toml` | `NOT DONE` |
 | H743-only tool/clock identifiers reconciled in their owner lanes (`stm32h743zi`, `STM32H743ZI`, `stm32h743.repl`, `CORE_HZ`) | `NOT DONE` |
 | Schematic-to-BOM reconciliation from owner wiring diagram (§1 items 6–9; HIL BU12) | `NOT DONE` |
+| Interface-tag re-read 2026-11-24; §1C/§1D authoritative and mirrored in `RESOURCE_MAP.md` §2 / `HIL_CHECKLIST.md` §3 (docs only, no hardware claim) | `DONE` |
 
 After sign-off, mirror the assigned values into `main.rs`, `memory.x` and
 `firmware/Cargo.toml` and set each signed row to `ASSIGNED` with its schematic
